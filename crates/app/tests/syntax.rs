@@ -119,3 +119,29 @@ fn cj_skips_indent_inside_string() {
     );
     em.quit();
 }
+
+#[test]
+fn inc_file_opens_in_cpp_mode_with_highlighting() {
+    let em = Em::spawn();
+    let path = write_file(
+        &em.scratch,
+        "config.inc",
+        "class Widget {\npublic:\n    int size() { return 42; }\n};\n",
+    );
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("Widget", 5000));
+    assert!(em.wait_for("(cpp-mode)", 5000), "modeline shows cpp-mode");
+    em.keys(b"\x02"); // trigger the initial parse
+    assert!(em.wait_for("Widget", 3000));
+    em.drain();
+    assert!(
+        em.raw_contains(b"\x1b[38;5;5;49m"),
+        "c++ keywords styled magenta"
+    );
+    assert!(
+        em.raw_contains(b"\x1b[38;5;4;49m"),
+        "function name styled blue"
+    );
+    em.quit();
+}

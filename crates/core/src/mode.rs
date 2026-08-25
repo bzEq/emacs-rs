@@ -9,6 +9,7 @@ use crate::keymap::Keymap;
 pub enum Lang {
     Rust,
     Lua,
+    Cpp,
 }
 
 /// An active major mode attached to a buffer.
@@ -74,6 +75,16 @@ pub fn lua_def() -> ModeDef {
     }
 }
 
+pub fn cpp_def() -> ModeDef {
+    ModeDef {
+        name: "cpp-mode".into(),
+        lang: Some(Lang::Cpp),
+        indent_unit: Some(4),
+        comment_prefix: Some("//".into()),
+        keymap: None,
+    }
+}
+
 pub fn fundamental() -> Mode {
     fundamental_def().to_mode()
 }
@@ -86,6 +97,10 @@ pub fn lua() -> Mode {
     lua_def().to_mode()
 }
 
+pub fn cpp() -> Mode {
+    cpp_def().to_mode()
+}
+
 /// Pick a mode from a file path (or buffer name).
 pub fn mode_for_path(path: &str) -> Mode {
     let lower = path.to_ascii_lowercase();
@@ -93,6 +108,15 @@ pub fn mode_for_path(path: &str) -> Mode {
         rust()
     } else if lower.ends_with(".lua") {
         lua()
+    } else if lower.ends_with(".cpp")
+        || lower.ends_with(".cc")
+        || lower.ends_with(".cxx")
+        || lower.ends_with(".hpp")
+        || lower.ends_with(".hh")
+        || lower.ends_with(".h")
+        || lower.ends_with(".inc")
+    {
+        cpp()
     } else {
         fundamental()
     }
@@ -107,5 +131,8 @@ mod tests {
         assert_eq!(mode_for_path("main.rs").name, "rust-mode");
         assert_eq!(mode_for_path("/x/y/init.LUA").name, "lua-mode");
         assert_eq!(mode_for_path("notes.txt").name, "fundamental-mode");
+        assert_eq!(mode_for_path("header.inc").name, "cpp-mode");
+        assert_eq!(mode_for_path("main.cpp").name, "cpp-mode");
+        assert_eq!(mode_for_path("legacy.h").name, "cpp-mode");
     }
 }

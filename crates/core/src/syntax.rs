@@ -35,6 +35,7 @@ pub fn parse(lang: Lang, text: &str) -> Option<Syntax> {
     let language = match lang {
         Lang::Rust => tree_sitter::Language::new(tree_sitter_rust::LANGUAGE),
         Lang::Lua => tree_sitter::Language::new(tree_sitter_lua::LANGUAGE),
+        Lang::Cpp => tree_sitter::Language::new(tree_sitter_cpp::LANGUAGE),
     };
     parser.set_language(&language).ok()?;
     let tree = parser.parse(text, None)?;
@@ -53,6 +54,15 @@ pub fn kind_is_comment_or_string(lang: Lang, kind: &str) -> bool {
                 | "raw_string_literal"
         ),
         Lang::Lua => matches!(kind, "comment" | "string"),
+        Lang::Cpp => matches!(
+            kind,
+            "comment"
+                | "string_literal"
+                | "raw_string_literal"
+                | "char_literal"
+                | "system_lib_string"
+                | "string_content"
+        ),
     }
 }
 
@@ -110,6 +120,22 @@ pub fn group_for(lang: Lang, kind: &str) -> Option<Group> {
             "number" => Some(Number),
             _ => None,
         },
+        Lang::Cpp => match kind {
+            "if" | "else" | "for" | "while" | "do" | "return" | "switch" | "case" | "break"
+            | "continue" | "struct" | "class" | "union" | "enum" | "namespace" | "using"
+            | "typedef" | "template" | "typename" | "public" | "private" | "protected"
+            | "virtual" | "static" | "const" | "constexpr" | "inline" | "new" | "delete"
+            | "this" | "true" | "false" | "nullptr" | "try" | "catch" | "throw" | "sizeof"
+            | "auto" | "extern" | "volatile" | "register" | "explicit" | "friend" | "operator"
+            | "override" | "final" | "goto" | "default" => Some(Keyword),
+            "string_literal" | "raw_string_literal" | "char_literal" | "system_lib_string" => {
+                Some(String)
+            }
+            "comment" => Some(Comment),
+            "number_literal" => Some(Number),
+            "type_identifier" | "primitive_type" | "sized_type_specifier" => Some(Type),
+            _ => None,
+        },
     }
 }
 
@@ -126,6 +152,20 @@ struct RawSeg {
     end: usize,
     group: Group,
     depth: usize,
+}
+
+/// First `identifier`-kind node within a subtree (function names).
+fn first_identifier(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() == "identifier" || node.kind() == "field_identifier" {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = first_identifier(child) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -169,6 +209,15 @@ fn collect(
     if lang == Lang::Rust && (kind == "function_item" || kind == "function_signature_item") {
         if let Some(name) = node.named_child(0) {
             push_range(name.start_byte(), name.end_byte(), Group::Function);
+        }
+    }
+
+    // function names (C++): color the declarator's identifier
+    if lang == Lang::Cpp && kind == "function_definition" {
+        if let Some(decl) = node.child_by_field_name("declarator") {
+            if let Some(name) = first_identifier(decl) {
+                push_range(name.start_byte(), name.end_byte(), Group::Function);
+            }
         }
     }
 
@@ -281,6 +330,33 @@ mod tests {
             segs.iter()
                 .any(|s| s.group == Group::Function && s.start == 3 && s.end == 8),
             "hello is 3..8"
+        );
+    }
+
+    #[test]
+    fn cpp_keywords_strings_comments() {
+        let b = buf_with("t.inc", "int main() { return 42; } // hi\n");
+        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        assert!(segs.iter().any(|s| s.group == Group::Keyword), "return");
+        assert!(segs.iter().any(|s| s.group == Group::Comment));
+        assert!(segs.iter().any(|s| s.group == Group::Number));
+        assert!(
+            segs.iter()
+                .any(|s| s.group == Group::Type && b.rope().to_string()[s.start..s.end] == *"int"),
+            "int is a primitive type"
+        );
+    }
+
+    #[test]
+    fn cpp_function_name_colored() {
+        let b = buf_with("t.cpp", "int greet() { return 0; }\n");
+        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        assert!(
+            segs.iter().any(|s| s.group == Group::Function && {
+                let text = b.rope().to_string();
+                &text[s.start..s.end] == "greet"
+            }),
+            "greet colored as a function"
         );
     }
 }

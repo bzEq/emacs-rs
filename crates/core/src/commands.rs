@@ -419,6 +419,10 @@ fn lua_mode(ed: &mut Editor) -> Result<()> {
     set_mode(ed, "lua-mode")
 }
 
+fn cpp_mode(ed: &mut Editor) -> Result<()> {
+    set_mode(ed, "cpp-mode")
+}
+
 fn line_numbers_mode(ed: &mut Editor) -> Result<()> {
     let idx = ed.selected_buffer_index();
     match ed.toggle_minor_mode(idx, "line-numbers") {
@@ -1005,6 +1009,7 @@ pub fn register_defaults(ed: &mut Editor) {
     );
     register!(ed, "rust-mode", rust_mode, "Set the buffer to rust mode.");
     register!(ed, "lua-mode", lua_mode, "Set the buffer to lua mode.");
+    register!(ed, "cpp-mode", cpp_mode, "Set the buffer to c++ mode.");
     register!(
         ed,
         "line-numbers-mode",

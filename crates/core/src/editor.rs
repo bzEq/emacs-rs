@@ -114,6 +114,7 @@ impl Editor {
             crate::mode::fundamental_def(),
             crate::mode::rust_def(),
             crate::mode::lua_def(),
+            crate::mode::cpp_def(),
         ] {
             mode_defs.insert(def.name.clone(), def);
         }
