@@ -269,6 +269,8 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
 
     // The minibuffer scrolls horizontally so the caret stays visible when
     // the line overflows the echo area (long prompts, long typed paths).
+    // Space is reserved for the completion preview, which renders after
+    // the caret.
     let mut scroll = 0usize;
     let echo_text: String = if let Some(mb) = ed.minibuffer() {
         let caret = if mb.cursor == mb.input.chars().count() {
@@ -280,8 +282,10 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         let line = format!("{}{}{}{}", mb.prompt, mb.input, caret, mb.preview);
         let width = line_rect.width.max(1) as usize;
         let cursor_col = mb.prompt.chars().count() + mb.cursor;
-        if line.chars().count() > width && cursor_col >= width {
-            scroll = cursor_col - width + 1;
+        let preview_chars = mb.preview.chars().count();
+        let keep = width.saturating_sub(1 + preview_chars);
+        if cursor_col > keep {
+            scroll = cursor_col - keep;
         }
         if scroll > 0 {
             line.chars().skip(scroll).collect()
