@@ -162,3 +162,34 @@ fn find_file_tab_cycles_directory_entries() {
     assert!(em.wait_for("beta.txt", 5000), "cycled file opened");
     em.quit();
 }
+
+#[test]
+fn find_file_defaults_to_buffer_file_directory() {
+    let em = Em::spawn();
+    let d = em.scratch.join("proj");
+    std::fs::create_dir(&d).unwrap();
+    std::fs::write(d.join("main.txt"), "main\n").unwrap();
+    std::fs::write(d.join("hello.txt"), "hi\n").unwrap();
+    let d_s = d.to_string_lossy().into_owned();
+    let main_s = format!("{d_s}/main.txt");
+    let mut em = Em::spawn_with_args(&[&main_s]);
+    assert!(em.wait_for("main", 5000));
+    em.keys(b"\x18\x06"); // C-x C-f
+    assert!(
+        em.wait_for(&format!("Find file: {d_s}/"), 3000),
+        "prompt starts in the buffer file's directory"
+    );
+    em.type_str("hel");
+    assert!(em.wait_for_row(23, "hel", 3000), "typed prefix shown");
+    em.drain();
+    assert!(
+        em.screen.row_text(23).contains("lo.txt"),
+        "relative completion preview"
+    );
+    em.keys(b"\r");
+    assert!(
+        em.wait_for("hi", 5000),
+        "hello.txt opened from the file dir"
+    );
+    em.quit();
+}

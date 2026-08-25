@@ -119,7 +119,10 @@ fn marked_or_current(ed: &Editor) -> Vec<usize> {
         .collect()
 }
 
-fn default_dir(ed: &Editor) -> PathBuf {
+/// The directory that file operations should start from: the current
+/// dired buffer's directory, else the current file's parent directory,
+/// else the process working directory.
+pub fn default_dir(ed: &Editor) -> PathBuf {
     if let Some(d) = ed.buf().dired() {
         return d.dir.clone();
     }
@@ -129,6 +132,69 @@ fn default_dir(ed: &Editor) -> PathBuf {
         }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+}
+
+/// Expand a leading `~/` in a path.
+pub fn expand_tilde(input: &str) -> String {
+    if let Some(rest) = input.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = Path::new(&home);
+            return format!("{}/{}", home.display(), rest);
+        }
+    }
+    input.to_string()
+}
+
+/// List `list_dir` and return entries matching `name_prefix`, prefixed
+/// with `out_prefix` (empty for relative completions). Directories sort
+/// first with a trailing `/`; dotfiles are hidden unless the prefix
+/// starts with `.`.
+fn list_matching(list_dir: &str, out_prefix: &str, name_prefix: &str) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(list_dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, bool)> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            (name, is_dir)
+        })
+        .filter(|(name, _)| {
+            name.starts_with(name_prefix)
+                && (name_prefix.starts_with('.') || !name.starts_with('.'))
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        b.1.cmp(&a.1) // directories first
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+    entries
+        .into_iter()
+        .map(|(name, is_dir)| {
+            let mut full = out_prefix.to_string();
+            full.push_str(&name);
+            if is_dir {
+                full.push('/');
+            }
+            full
+        })
+        .collect()
+}
+
+/// Completion over file names: for inputs containing a `/`, the directory
+/// part of the input is listed; otherwise the editor's default directory
+/// (dired dir > current file's parent > cwd) is used and candidates are
+/// returned as relative names.
+pub fn complete_file_names(ed: &Editor, input: &str) -> Vec<String> {
+    let expanded = expand_tilde(input);
+    match expanded.rfind('/') {
+        Some(i) => list_matching(&expanded[..i + 1], &expanded[..i + 1], &expanded[i + 1..]),
+        None => {
+            let base = default_dir(ed);
+            list_matching(&base.to_string_lossy(), "", &expanded)
+        }
+    }
 }
 
 /// Open a directory in a dired buffer (creating it if needed), optionally
@@ -239,12 +305,18 @@ fn cmd_dired(ed: &mut Editor) -> Result<()> {
     let default = default_dir(ed);
     ed.read_string(
         format!("Dired (directory): {} ", default.display()),
-        None,
+        Some(complete_file_names),
         Box::new(move |ed, input| {
             let dir = if input.trim().is_empty() {
                 default
             } else {
-                PathBuf::from(input)
+                let expanded = expand_tilde(input.trim());
+                let p = PathBuf::from(&expanded);
+                if p.is_absolute() {
+                    p
+                } else {
+                    default.join(p)
+                }
             };
             open_dir(ed, &dir, false)
         }),
@@ -714,5 +786,62 @@ mod tests {
             ed.buf().dired().unwrap().dir,
             t.0.join("sub").canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn file_completion_lists_dir_entries() {
+        let t = TmpDir::new();
+        fs::create_dir(t.0.join("sub")).unwrap();
+        fs::write(t.0.join("alpha.txt"), "a").unwrap();
+        fs::write(t.0.join("beta.txt"), "b").unwrap();
+        fs::write(t.0.join(".hidden"), "h").unwrap();
+        let ed = Editor::new(20, 80);
+        let base = t.0.display().to_string();
+        assert_eq!(
+            complete_file_names(&ed, &format!("{base}/a")),
+            vec![format!("{base}/alpha.txt")]
+        );
+        // empty prefix: all entries, directories first, dotfiles hidden
+        assert_eq!(
+            complete_file_names(&ed, &format!("{base}/")),
+            vec![
+                format!("{base}/sub/"),
+                format!("{base}/alpha.txt"),
+                format!("{base}/beta.txt"),
+            ]
+        );
+        // dotfiles appear once the prefix starts with '.'
+        assert_eq!(
+            complete_file_names(&ed, &format!("{base}/.")),
+            vec![format!("{base}/.hidden")]
+        );
+        // non-existent directory: no candidates
+        assert!(complete_file_names(&ed, &format!("{base}/nope/x")).is_empty());
+    }
+
+    #[test]
+    fn file_completion_uses_buffer_file_parent_as_base() {
+        let t = TmpDir::new();
+        fs::write(t.0.join("alpha.txt"), "a").unwrap();
+        fs::create_dir(t.0.join("sub")).unwrap();
+        let mut ed = Editor::new(20, 80);
+        // current buffer is a file inside t.0
+        let buf = Buffer::load_file(t.0.join("alpha.txt")).unwrap();
+        let id = buf.id;
+        ed.add_buffer(buf);
+        ed.set_selected_buffer(id);
+        let cands = complete_file_names(&ed, "su");
+        assert_eq!(cands, vec!["sub/"], "relative names from the file's dir");
+        let cands = complete_file_names(&ed, "a");
+        assert_eq!(cands, vec!["alpha.txt"]);
+    }
+
+    #[test]
+    fn file_completion_uses_dired_dir_as_base() {
+        let t = TmpDir::new();
+        fs::write(t.0.join("alpha.txt"), "a").unwrap();
+        let ed = dired_ed(&t.0);
+        let cands = complete_file_names(&ed, "al");
+        assert_eq!(cands, vec!["alpha.txt"]);
     }
 }
