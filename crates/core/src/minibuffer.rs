@@ -74,10 +74,11 @@ impl Minibuffer {
         self.cursor = self.input.chars().count();
     }
 
-    /// Fill the longest common prefix of all candidates and remember the
-    /// candidates for display. Resets the cycle position when the candidate
-    /// set changes.
-    pub fn complete_with(&mut self, candidates: Vec<String>) {
+    /// Store candidates for display and, if `fill` is set, extend the input
+    /// to their longest common prefix. Resets the cycle position when the
+    /// candidate set changes. `fill` must be false after deletions, so the
+    /// auto-fill does not re-insert what the user just deleted.
+    pub fn complete_with(&mut self, candidates: Vec<String>, fill: bool) {
         if self.candidates != candidates {
             self.cycle = usize::MAX;
         }
@@ -85,13 +86,15 @@ impl Minibuffer {
             self.candidates.clear();
             return;
         }
-        let mut lcp: &str = &candidates[0];
-        for c in &candidates[1..] {
-            lcp = common_prefix(lcp, c);
-        }
-        if lcp.chars().count() > self.input.chars().count() {
-            self.input = lcp.to_string();
-            self.cursor = self.input.chars().count();
+        if fill {
+            let mut lcp: &str = &candidates[0];
+            for c in &candidates[1..] {
+                lcp = common_prefix(lcp, c);
+            }
+            if lcp.chars().count() > self.input.chars().count() {
+                self.input = lcp.to_string();
+                self.cursor = self.input.chars().count();
+            }
         }
         self.candidates = candidates;
     }
@@ -182,7 +185,7 @@ mod tests {
     fn completion_fills_lcp_then_cycles() {
         let mut mb = Minibuffer::new("M-x ".into(), None);
         mb.insert_char('d');
-        mb.complete_with(vec!["delete-char".into(), "describe-key".into()]);
+        mb.complete_with(vec!["delete-char".into(), "describe-key".into()], true);
         assert_eq!(mb.input, "de", "common prefix filled");
         assert_eq!(mb.candidates.len(), 2);
         // TAB again: cycle through candidates
@@ -199,7 +202,7 @@ mod tests {
         let mut mb = Minibuffer::new("M-x ".into(), None);
         mb.insert_char('l');
         mb.insert_char('u');
-        mb.complete_with(vec!["lua-mode".into()]);
+        mb.complete_with(vec!["lua-mode".into()], true);
         assert_eq!(mb.input, "lua-mode");
         assert!(!mb.cycle(), "single candidate does not cycle");
     }
@@ -207,16 +210,32 @@ mod tests {
     #[test]
     fn cycle_resets_when_candidates_change() {
         let mut mb = Minibuffer::new("M-x ".into(), None);
-        mb.complete_with(vec!["a-command".into(), "b-command".into()]);
+        mb.complete_with(vec!["a-command".into(), "b-command".into()], true);
         assert!(mb.cycle());
         assert_eq!(mb.input, "a-command");
         // new input -> new candidate set -> cycle restarts
-        mb.complete_with(vec![
-            "a-command".into(),
-            "b-command".into(),
-            "c-command".into(),
-        ]);
+        mb.complete_with(
+            vec!["a-command".into(), "b-command".into(), "c-command".into()],
+            true,
+        );
         assert!(mb.cycle());
         assert_eq!(mb.input, "a-command");
+    }
+
+    #[test]
+    fn no_fill_after_deletion() {
+        let mut mb = Minibuffer::new("M-x ".into(), None);
+        mb.complete_with(
+            vec!["describe-bindings".into(), "describe-key".into()],
+            true,
+        );
+        assert_eq!(mb.input, "describe-", "auto-fill on insert");
+        // user hits backspace: refresh candidates without re-filling
+        mb.delete_backward();
+        mb.complete_with(
+            vec!["describe-bindings".into(), "describe-key".into()],
+            false,
+        );
+        assert_eq!(mb.input, "describe", "deleted char stays deleted");
     }
 }

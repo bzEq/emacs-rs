@@ -286,9 +286,10 @@ fn dispatch(ed: &mut Editor, key: Key) -> Result<()> {
     Ok(())
 }
 
-/// Recompute completion candidates from the minibuffer input: fills the
-/// longest common prefix and refreshes the candidate list for display.
-fn update_completion(ed: &mut Editor) {
+/// Recompute completion candidates from the minibuffer input. When `fill`
+/// is set the longest common prefix is auto-filled; after deletions it must
+/// be false so the auto-fill doesn't re-insert deleted characters.
+fn update_completion(ed: &mut Editor, fill: bool) {
     let Some(completer) = ed.minibuffer().and_then(|mb| mb.completion) else {
         return;
     };
@@ -298,7 +299,7 @@ fn update_completion(ed: &mut Editor) {
         .unwrap_or_default();
     let candidates = completer(ed, &input);
     if let Some(mb) = ed.minibuffer_mut() {
-        mb.complete_with(candidates);
+        mb.complete_with(candidates, fill);
     }
     // recompute against the (possibly extended) input so the displayed
     // candidates always match what is in the minibuffer
@@ -346,14 +347,14 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
                 if let Some(mb) = ed.minibuffer_mut() {
                     mb.delete_forward();
                 }
-                update_completion(ed);
+                update_completion(ed, false);
             }
             'k' => {
                 if let Some(mb) = ed.minibuffer_mut() {
                     mb.input.truncate(mb.cursor);
                     mb.candidates.clear();
                 }
-                update_completion(ed);
+                update_completion(ed, false);
             }
             _ => {}
         },
@@ -361,7 +362,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             if let Some(mb) = ed.minibuffer_mut() {
                 mb.insert_char(c);
             }
-            update_completion(ed);
+            update_completion(ed, true);
         }
         Enter => {
             let input = ed
@@ -375,7 +376,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
                 .minibuffer()
                 .map(|mb| mb.input.clone())
                 .unwrap_or_default();
-            update_completion(ed);
+            update_completion(ed, true);
             let after = ed
                 .minibuffer()
                 .map(|mb| mb.input.clone())
@@ -391,13 +392,13 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             if let Some(mb) = ed.minibuffer_mut() {
                 mb.delete_backward();
             }
-            update_completion(ed);
+            update_completion(ed, false);
         }
         Delete => {
             if let Some(mb) = ed.minibuffer_mut() {
                 mb.delete_forward();
             }
-            update_completion(ed);
+            update_completion(ed, false);
         }
         Left => {
             if let Some(mb) = ed.minibuffer_mut() {
