@@ -170,7 +170,7 @@ pub fn handle_key(ed: &mut Editor, key: &Key) -> Result<ISearchResult> {
             ed.buf_mut().set_point(start);
             ed.set_isearch(None);
             ed.message("Quit");
-            return Ok(Exit { replay: None });
+            Ok(Exit { replay: None })
         }
         KeyCode::Char(c) if ctrl && c == 's' => {
             // C-s: next match, or switch from backward to forward search.
@@ -185,7 +185,7 @@ pub fn handle_key(ed: &mut Editor, key: &Key) -> Result<ISearchResult> {
                 step(ed, false);
             }
             ed.message(prompt(ed));
-            return Ok(Consumed);
+            Ok(Consumed)
         }
         KeyCode::Char(c) if ctrl && c == 'r' => {
             // C-r: previous match, or switch from forward to backward search.
@@ -200,7 +200,7 @@ pub fn handle_key(ed: &mut Editor, key: &Key) -> Result<ISearchResult> {
                 step(ed, false);
             }
             ed.message(prompt(ed));
-            return Ok(Consumed);
+            Ok(Consumed)
         }
         KeyCode::Char(c) if ctrl && c == 'w' => {
             // pull the word at point into the query
@@ -220,7 +220,7 @@ pub fn handle_key(ed: &mut Editor, key: &Key) -> Result<ISearchResult> {
             ed.set_isearch(Some(is));
             step(ed, true);
             ed.message(prompt(ed));
-            return Ok(Consumed);
+            Ok(Consumed)
         }
         KeyCode::Backspace => {
             let mut is = ed.take_isearch().expect("isearch active");
@@ -232,7 +232,7 @@ pub fn handle_key(ed: &mut Editor, key: &Key) -> Result<ISearchResult> {
             ed.set_isearch(Some(is));
             step(ed, true);
             ed.message(prompt(ed));
-            return Ok(Consumed);
+            Ok(Consumed)
         }
         KeyCode::Char(c) if !ctrl && !alt => {
             let mut is = ed.take_isearch().expect("isearch active");
@@ -241,23 +241,23 @@ pub fn handle_key(ed: &mut Editor, key: &Key) -> Result<ISearchResult> {
             ed.set_isearch(Some(is));
             step(ed, true);
             ed.message(prompt(ed));
-            return Ok(Consumed);
+            Ok(Consumed)
         }
         KeyCode::Enter => {
             ed.set_isearch(None);
             ed.clear_echo();
-            return Ok(Exit { replay: None });
+            Ok(Exit { replay: None })
         }
         KeyCode::Esc => {
             ed.set_isearch(None);
             ed.clear_echo();
-            return Ok(Exit { replay: None });
+            Ok(Exit { replay: None })
         }
         _ => {
             // any other key leaves the search and runs normally
             ed.set_isearch(None);
             ed.clear_echo();
-            return Ok(Exit { replay: Some(*key) });
+            Ok(Exit { replay: Some(*key) })
         }
     }
 }

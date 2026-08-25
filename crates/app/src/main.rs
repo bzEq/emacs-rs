@@ -384,7 +384,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             ed.finish_read_string(input)?;
         }
         Tab => {
-            let had_preview = ed.minibuffer().map_or(false, |mb| !mb.preview.is_empty());
+            let had_preview = ed.minibuffer().is_some_and(|mb| !mb.preview.is_empty());
             if let Some(mb) = ed.minibuffer_mut() {
                 mb.accept_preview();
             }

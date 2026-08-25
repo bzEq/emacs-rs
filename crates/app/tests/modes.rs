@@ -72,7 +72,7 @@ fn lua_minor_mode_keymap_and_lighter() {
 
 #[test]
 fn line_numbers_gutter() {
-    let mut em = Em::spawn();
+    let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "one\ntwo\n");
     let path_s = path.to_string_lossy().into_owned();
     let mut em = Em::spawn_with_args(&[&path_s]);

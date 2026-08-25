@@ -133,7 +133,7 @@ impl WindowTree {
                 let node = self.node_at_mut(&path_to_parent);
                 if let Node::Pair(_, a, b) = node {
                     let slot = if i == 0 { a } else { b };
-                    *slot = Box::new(pair);
+                    **slot = pair;
                 }
             }
             _ => {
@@ -179,6 +179,7 @@ impl WindowTree {
 
     /// Cycle to the next window in tree order (C-x o). Returns false if
     /// there is only one window.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         let leaves = self.leaf_paths();
         if leaves.len() <= 1 {

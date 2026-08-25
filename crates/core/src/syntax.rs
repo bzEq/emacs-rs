@@ -128,6 +128,7 @@ struct RawSeg {
     depth: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect(
     node: Node<'_>,
     lang: Lang,

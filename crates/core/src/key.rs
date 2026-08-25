@@ -61,6 +61,7 @@ impl Key {
         }
     }
 
+    #[allow(clippy::self_named_constructors)]
     pub fn key(code: KeyCode) -> Self {
         Key {
             code,

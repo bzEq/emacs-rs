@@ -190,7 +190,7 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         return None;
     }
 
-    let completing = ed.minibuffer().map_or(false, |mb| {
+    let completing = ed.minibuffer().is_some_and(|mb| {
         mb.completion.is_some() && !mb.candidates.is_empty() && mb.candidates.len() >= 2
     });
     let echo_h: u16 = if completing { 2 } else { 1 };

@@ -154,9 +154,10 @@ pub fn newline_and_indent(ed: &mut Editor) {
 pub fn electric_newline_and_maybe_indent(ed: &mut Editor) {
     let before = ed.buf().point();
     let indent_unit = ed.buf().mode().indent_unit;
-    let in_str_or_comment = ed.buf().syntax().map_or(false, |s| {
-        crate::syntax::point_in_comment_or_string(s, ed.buf().rope(), before)
-    });
+    let in_str_or_comment = ed
+        .buf()
+        .syntax()
+        .is_some_and(|s| crate::syntax::point_in_comment_or_string(s, ed.buf().rope(), before));
     ed.buf_mut().insert("\n");
     let Some(unit) = indent_unit else {
         return;

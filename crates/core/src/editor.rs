@@ -395,7 +395,7 @@ impl Editor {
         if buf.syntax().is_some()
             && buf
                 .syntax_last_parse()
-                .map_or(false, |t| t.elapsed() < COOLDOWN)
+                .is_some_and(|t| t.elapsed() < COOLDOWN)
         {
             return; // dirty but throttled; re-parsed on a later key
         }
@@ -736,7 +736,7 @@ impl Editor {
     /// Run a hook (e.g. "before_save") if a script host is attached.
     pub fn run_hook(&mut self, name: &str) -> Result<()> {
         let mut res = Ok(());
-        let _ = self.with_host(|ed, host| {
+        self.with_host(|ed, host| {
             res = host.call_hook(name, ed);
         });
         res
@@ -745,7 +745,7 @@ impl Editor {
     /// Load a script file (init.lua).
     pub fn load_script(&mut self, path: &Path) -> Result<()> {
         let mut res = Ok(());
-        let _ = self.with_host(|ed, host| {
+        self.with_host(|ed, host| {
             res = host.load_file(path, ed);
         });
         res
@@ -996,6 +996,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unnecessary_to_owned)]
     fn prefix_stays_in_source_keymap() {
         let mut ed = Editor::new(20, 80);
         let mut local = Keymap::new();
@@ -1003,6 +1004,7 @@ mod tests {
         let idx = ed.selected_buffer_index();
         ed.buffers_mut()[idx].set_local_keymap(Some(local));
         ed.push_key(Key::ctrl('c'));
+        // to_vec() avoids borrowing `ed` twice in the same call
         assert_eq!(ed.lookup_key(&ed.pending_keys().to_vec()), Lookup::Prefix);
         ed.push_key(Key::ctrl('c'));
         assert_eq!(

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared PTY test harness: spawns the `em` binary in a pseudo-terminal,
 //! feeds it keystrokes, and reconstructs the screen for assertions.
 //!
@@ -365,7 +366,7 @@ fn openpty(rows: u16, cols: u16) -> (File, File) {
     unsafe {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
-        let mut ws = libc::winsize {
+        let ws = libc::winsize {
             ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
@@ -376,7 +377,7 @@ fn openpty(rows: u16, cols: u16) -> (File, File) {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null(),
-            &mut ws,
+            &ws,
         );
         assert_eq!(r, 0, "openpty failed: {}", std::io::Error::last_os_error());
         (File::from_raw_fd(master), File::from_raw_fd(slave))

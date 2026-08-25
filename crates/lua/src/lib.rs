@@ -24,6 +24,12 @@ struct EditorRef(*mut Editor);
 
 unsafe impl Send for EditorRef {}
 
+/// The editor pointer is stored in Lua app-data for the duration of each
+/// host call (see the safety notes at the top of this file). Lua runs on
+/// the main thread and the surrounding `&mut Editor` is not accessed while
+/// Lua code executes, so recovering `&mut Editor` from `&Lua` here is
+/// sound; the lint does not know about the app-data discipline.
+#[allow(clippy::mut_from_ref)]
 fn editor_ref(lua: &Lua) -> mlua::Result<&mut Editor> {
     let guard = lua.app_data_ref::<Option<EditorRef>>();
     match guard {
@@ -47,8 +53,7 @@ fn parse_keymap_table(_lua: &Lua, table: Option<Table>) -> mlua::Result<Option<K
     let mut km = Keymap::new();
     for pair in t.pairs::<String, String>() {
         let (seq, cmd) = pair?;
-        let keys =
-            emacs_core::key::parse_sequence(&seq).map_err(|e| mlua::Error::RuntimeError(e))?;
+        let keys = emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
         km.bind_sequence(&keys, &cmd);
     }
     if km.is_empty() {
@@ -236,8 +241,8 @@ impl LuaHost {
         emacs.set(
             "bind",
             lua.create_function(|lua, (seq, cmd): (String, String)| {
-                let keys = emacs_core::key::parse_sequence(&seq)
-                    .map_err(|e| mlua::Error::RuntimeError(e))?;
+                let keys =
+                    emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
                 let ed = editor_ref(lua)?;
                 ed.keymap_mut().bind_sequence(&keys, &cmd);
                 Ok(())
@@ -246,8 +251,8 @@ impl LuaHost {
         emacs.set(
             "local_set_key",
             lua.create_function(|lua, (seq, cmd): (String, String)| {
-                let keys = emacs_core::key::parse_sequence(&seq)
-                    .map_err(|e| mlua::Error::RuntimeError(e))?;
+                let keys =
+                    emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
                 let ed = editor_ref(lua)?;
                 let idx = ed.selected_buffer_index();
                 ed.local_set_key(idx, &keys, &cmd);
@@ -335,7 +340,7 @@ impl LuaHost {
                 emacs.set("_next_id", next + 1)?;
                 commands.set(next, toggler)?;
                 let ed = editor_ref(lua)?;
-                ed.commands_mut().add_lua(&format!("{name}-mode"), next);
+                ed.commands_mut().add_lua(format!("{name}-mode"), next);
                 Ok(())
             })?,
         )?;

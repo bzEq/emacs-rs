@@ -16,6 +16,7 @@ fn n_repeat(ed: &Editor, default: usize) -> usize {
 }
 
 /// Confirm save of a modified buffer; runs `cont` after confirmation.
+#[allow(clippy::type_complexity)]
 fn confirm_save(ed: &mut Editor, idx: usize, cont: Box<dyn FnOnce(&mut Editor) -> Result<()>>) {
     let name = ed.buffers()[idx].name().to_string();
     if ed.buffers()[idx].modified() {
@@ -34,10 +35,8 @@ fn confirm_save(ed: &mut Editor, idx: usize, cont: Box<dyn FnOnce(&mut Editor) -
                 }
             }),
         );
-    } else {
-        if let Err(e) = cont(ed) {
-            ed.error(e.to_string());
-        }
+    } else if let Err(e) = cont(ed) {
+        ed.error(e.to_string());
     }
 }
 
@@ -524,7 +523,7 @@ fn kill_buffer(ed: &mut Editor) -> Result<()> {
         Some(complete_buffer_names),
         Box::new(move |ed, name| {
             let name = if name.is_empty() { default } else { name };
-            let Some(idx) = ed.buffers().iter().position(|b| b.name() == &name) else {
+            let Some(idx) = ed.buffers().iter().position(|b| b.name() == name) else {
                 ed.error(format!("no buffer named {name}"));
                 return Ok(());
             };
@@ -559,6 +558,7 @@ fn save_buffers_kill_terminal(ed: &mut Editor) -> Result<()> {
 }
 
 /// Ask about each modified buffer in turn, then run `cont`.
+#[allow(clippy::type_complexity)]
 fn confirm_all_modified(
     ed: &mut Editor,
     idx: usize,

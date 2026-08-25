@@ -142,7 +142,7 @@ pub fn open_dir(ed: &mut Editor, dir: &Path, other_window: bool) -> Result<()> {
     let id = match ed
         .buffers()
         .iter()
-        .position(|b| b.dired().map_or(false, |d| d.dir == dir))
+        .position(|b| b.dired().is_some_and(|d| d.dir == dir))
     {
         Some(idx) => ed.buffers()[idx].id,
         None => {
@@ -341,10 +341,10 @@ fn cmd_dired_unmark_all(ed: &mut Editor) -> Result<()> {
 fn cmd_dired_delete(ed: &mut Editor) -> Result<()> {
     let targets: Vec<(PathBuf, bool)> = marked_or_current(ed)
         .into_iter()
-        .filter_map(|i| {
+        .map(|i| {
             let d = ed.buf().dired().expect("dired buffer");
             let e = &d.entries[i];
-            Some((e.path.clone(), e.is_dir))
+            (e.path.clone(), e.is_dir)
         })
         .collect();
     if targets.is_empty() {
@@ -436,11 +436,7 @@ fn cmd_dired_copy(ed: &mut Editor) -> Result<()> {
         .filter_map(|i| {
             let d = ed.buf().dired().expect("dired buffer");
             let e = &d.entries[i];
-            if is_dot_entry(&e.name) {
-                None
-            } else {
-                Some(e.path.clone())
-            }
+            (!is_dot_entry(&e.name)).then(|| e.path.clone())
         })
         .collect();
     if targets.is_empty() {

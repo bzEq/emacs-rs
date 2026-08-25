@@ -6,7 +6,7 @@ use common::{write_file, Em};
 
 #[test]
 fn split_vertical_shows_two_panes() {
-    let mut em = Em::spawn();
+    let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "hello world\n");
     let path_s = path.to_string_lossy().into_owned();
     let mut em = Em::spawn_with_args(&[&path_s]);
@@ -30,7 +30,7 @@ fn split_vertical_shows_two_panes() {
 
 #[test]
 fn split_and_delete_other_windows() {
-    let mut em = Em::spawn();
+    let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "hello world\n");
     let path_s = path.to_string_lossy().into_owned();
     let mut em = Em::spawn_with_args(&[&path_s]);
