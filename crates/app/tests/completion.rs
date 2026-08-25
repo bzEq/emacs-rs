@@ -122,8 +122,9 @@ fn find_file_completes_names() {
     let mut em = Em::spawn();
     assert!(em.wait_for("lines", 5000), "editor ready");
     em.keys(b"\x18\x06"); // C-x C-f
+    assert!(em.wait_for("Find file:", 4000), "minibuffer prompt opened");
     em.type_str(&format!("{d_s}/hel"));
-    assert!(em.wait_for_row(23, "hel", 3000), "typed path shown");
+    em.expect_row(23, "hel", "typed path shown");
     em.drain();
     assert!(
         em.screen.row_text(23).contains("lo.txt"),
@@ -146,18 +147,13 @@ fn find_file_tab_cycles_directory_entries() {
     let mut em = Em::spawn();
     assert!(em.wait_for("lines", 5000), "editor ready");
     em.keys(b"\x18\x06"); // C-x C-f
+    assert!(em.wait_for("Find file:", 4000), "minibuffer prompt opened");
     em.type_str(&format!("{d_s}/"));
     // TAB accepts nothing (LCP empty with both entries), cycles to alpha
     em.keys(b"\t");
-    assert!(
-        em.wait_for_row(23, "alpha.txt", 3000),
-        "TAB cycles to the first entry"
-    );
+    em.expect_row(23, "alpha.txt", "TAB cycles to the first entry");
     em.keys(b"\t");
-    assert!(
-        em.wait_for_row(23, "beta.txt", 3000),
-        "second TAB cycles to beta"
-    );
+    em.expect_row(23, "beta.txt", "second TAB cycles to beta");
     em.keys(b"\r");
     assert!(em.wait_for("beta.txt", 5000), "cycled file opened");
     em.quit();

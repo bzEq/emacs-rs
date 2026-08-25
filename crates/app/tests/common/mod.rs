@@ -306,6 +306,20 @@ impl Em {
         }
     }
 
+    /// Assert a row contains `text`, dumping the whole screen on failure.
+    pub fn expect_row(&mut self, row: usize, text: &str, what: &str) {
+        if !self.wait_for_row(row, text, 4000) {
+            panic!("{what}: screen was:\n{}", self.screen.text());
+        }
+    }
+
+    /// Assert the screen contains `text`, dumping it on failure.
+    pub fn expect_text(&mut self, text: &str, what: &str) {
+        if !self.wait_for(text, 4000) {
+            panic!("{what}: screen was:\n{}", self.screen.text());
+        }
+    }
+
     pub fn raw_contains(&self, needle: &[u8]) -> bool {
         self.raw.windows(needle.len()).any(|w| w == needle)
     }
