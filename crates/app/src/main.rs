@@ -361,6 +361,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             'k' => {
                 if let Some(mb) = ed.minibuffer_mut() {
                     mb.input.truncate(mb.cursor);
+                    mb.preview.clear();
                     mb.candidates.clear();
                 }
                 update_completion(ed, false);
@@ -374,24 +375,17 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             update_completion(ed, true);
         }
         Enter => {
-            let input = ed
-                .minibuffer()
-                .map(|mb| mb.input.clone())
-                .unwrap_or_default();
+            let input = ed.minibuffer().map(|mb| mb.accepted()).unwrap_or_default();
             ed.finish_read_string(input)?;
         }
         Tab => {
-            let before = ed
-                .minibuffer()
-                .map(|mb| mb.input.clone())
-                .unwrap_or_default();
+            let had_preview = ed.minibuffer().map_or(false, |mb| !mb.preview.is_empty());
+            if let Some(mb) = ed.minibuffer_mut() {
+                mb.accept_preview();
+            }
             update_completion(ed, true);
-            let after = ed
-                .minibuffer()
-                .map(|mb| mb.input.clone())
-                .unwrap_or_default();
-            if after == before {
-                // common prefix already filled: cycle through candidates
+            if !had_preview {
+                // nothing to accept: cycle through candidates instead
                 if let Some(mb) = ed.minibuffer_mut() {
                     mb.cycle();
                 }

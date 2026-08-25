@@ -16,6 +16,10 @@ pub struct Minibuffer {
     /// Current completion candidates (after the last Tab), for display.
     pub candidates: Vec<String>,
     pub cycle: usize,
+    /// Auto-completion preview: the part of the completed name that is
+    /// shown but not yet part of the input (ido-style). Typing a matching
+    /// character consumes it; RET accepts it.
+    pub preview: String,
 }
 
 impl Minibuffer {
@@ -27,18 +31,28 @@ impl Minibuffer {
             completion,
             candidates: Vec::new(),
             cycle: usize::MAX,
+            preview: String::new(),
         }
     }
 
     pub fn insert_char(&mut self, c: char) {
-        self.input.insert(self.cursor, c);
-        self.cursor += 1;
+        // if the typed char matches the preview, consume one preview char
+        if self.preview.starts_with(c) && self.cursor == self.input.chars().count() {
+            self.input.push(c);
+            self.cursor += 1;
+            self.preview = self.preview[c.len_utf8()..].to_string();
+        } else {
+            self.input.insert(self.cursor, c);
+            self.cursor += 1;
+            self.preview.clear();
+        }
         self.candidates.clear();
     }
 
     pub fn insert_str(&mut self, s: &str) {
         self.input.insert_str(self.cursor, s);
         self.cursor += s.chars().count();
+        self.preview.clear();
         self.candidates.clear();
     }
 
@@ -47,6 +61,7 @@ impl Minibuffer {
             self.cursor -= 1;
             self.input.remove(self.cursor);
         }
+        self.preview.clear();
         self.candidates.clear();
     }
 
@@ -54,6 +69,7 @@ impl Minibuffer {
         if self.cursor < self.input.chars().count() {
             self.input.remove(self.cursor);
         }
+        self.preview.clear();
         self.candidates.clear();
     }
 
@@ -74,29 +90,51 @@ impl Minibuffer {
         self.cursor = self.input.chars().count();
     }
 
-    /// Store candidates for display and, if `fill` is set, extend the input
-    /// to their longest common prefix. Resets the cycle position when the
-    /// candidate set changes. `fill` must be false after deletions, so the
-    /// auto-fill does not re-insert what the user just deleted.
+    /// The text that RET accepts: the typed input plus the completion
+    /// preview.
+    pub fn accepted(&self) -> String {
+        let mut s = self.input.clone();
+        s.push_str(&self.preview);
+        s
+    }
+
+    /// Store candidates for display and, if `fill` is set, compute the
+    /// ido-style preview (the completion suffix, shown but not part of the
+    /// input). Resets the cycle position when the candidate set changes.
+    /// `fill` must be false after deletions, so the preview does not
+    /// re-insert what the user just deleted.
     pub fn complete_with(&mut self, candidates: Vec<String>, fill: bool) {
         if self.candidates != candidates {
             self.cycle = usize::MAX;
         }
+        if !fill {
+            self.preview.clear();
+        }
         if candidates.is_empty() {
+            self.preview.clear();
             self.candidates.clear();
             return;
         }
-        if fill {
+        if fill && self.cursor == self.input.chars().count() {
+            // preview = LCP of the candidates (full name if unique)
             let mut lcp: &str = &candidates[0];
             for c in &candidates[1..] {
                 lcp = common_prefix(lcp, c);
             }
-            if lcp.chars().count() > self.input.chars().count() {
-                self.input = lcp.to_string();
-                self.cursor = self.input.chars().count();
+            if lcp.len() > self.input.len() && lcp.starts_with(&self.input) {
+                self.preview = lcp[self.input.len()..].to_string();
             }
         }
         self.candidates = candidates;
+    }
+
+    /// Fold the preview into the input (TAB or RET).
+    pub fn accept_preview(&mut self) {
+        if !self.preview.is_empty() {
+            self.input.push_str(&self.preview);
+            self.cursor = self.input.chars().count();
+            self.preview.clear();
+        }
     }
 
     /// Cycle the input through the candidates (TAB after the common prefix
@@ -109,6 +147,7 @@ impl Minibuffer {
         self.cycle = self.cycle.wrapping_add(1) % self.candidates.len();
         self.input = self.candidates[self.cycle].clone();
         self.cursor = self.input.chars().count();
+        self.preview.clear();
         true
     }
 }
@@ -182,13 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn completion_fills_lcp_then_cycles() {
+    fn completion_preview_then_cycles() {
         let mut mb = Minibuffer::new("M-x ".into(), None);
         mb.insert_char('d');
         mb.complete_with(vec!["delete-char".into(), "describe-key".into()], true);
-        assert_eq!(mb.input, "de", "common prefix filled");
+        assert_eq!(mb.input, "d", "input untouched");
+        assert_eq!(mb.preview, "e", "common prefix shown as preview");
+        assert_eq!(mb.accepted(), "de");
         assert_eq!(mb.candidates.len(), 2);
-        // TAB again: cycle through candidates
+        // TAB: fold the preview into the input
+        mb.accept_preview();
+        assert_eq!(mb.input, "de");
         assert!(mb.cycle());
         assert_eq!(mb.input, "delete-char");
         assert!(mb.cycle());
@@ -198,13 +241,39 @@ mod tests {
     }
 
     #[test]
-    fn single_candidate_fills_completely() {
+    fn single_candidate_previews_full_name() {
         let mut mb = Minibuffer::new("M-x ".into(), None);
         mb.insert_char('l');
         mb.insert_char('u');
         mb.complete_with(vec!["lua-mode".into()], true);
-        assert_eq!(mb.input, "lua-mode");
+        assert_eq!(mb.input, "lu");
+        assert_eq!(mb.preview, "a-mode");
+        assert_eq!(mb.accepted(), "lua-mode");
         assert!(!mb.cycle(), "single candidate does not cycle");
+    }
+
+    #[test]
+    fn typing_consumes_matching_preview() {
+        let mut mb = Minibuffer::new("M-x ".into(), None);
+        mb.insert_char('t');
+        mb.complete_with(vec!["txt-mode".into()], true);
+        assert_eq!(mb.preview, "xt-mode");
+        for c in "xt-mode".chars() {
+            mb.insert_char(c);
+        }
+        assert_eq!(mb.input, "txt-mode", "typing through the preview");
+        assert_eq!(mb.preview, "");
+        assert_eq!(mb.accepted(), "txt-mode");
+    }
+
+    #[test]
+    fn non_matching_char_drops_preview() {
+        let mut mb = Minibuffer::new("M-x ".into(), None);
+        mb.insert_char('t');
+        mb.complete_with(vec!["txt-mode".into()], true);
+        mb.insert_char('z');
+        assert_eq!(mb.input, "tz");
+        assert_eq!(mb.preview, "");
     }
 
     #[test]
@@ -225,17 +294,22 @@ mod tests {
     #[test]
     fn no_fill_after_deletion() {
         let mut mb = Minibuffer::new("M-x ".into(), None);
+        // user typed "describe" and the preview showed the LCP suffix
+        for c in "describe".chars() {
+            mb.insert_char(c);
+        }
         mb.complete_with(
             vec!["describe-bindings".into(), "describe-key".into()],
             true,
         );
-        assert_eq!(mb.input, "describe-", "auto-fill on insert");
+        assert_eq!(mb.preview, "-", "auto-fill preview on insert");
         // user hits backspace: refresh candidates without re-filling
         mb.delete_backward();
         mb.complete_with(
             vec!["describe-bindings".into(), "describe-key".into()],
             false,
         );
-        assert_eq!(mb.input, "describe", "deleted char stays deleted");
+        assert_eq!(mb.input, "describ", "deleted char stays deleted");
+        assert_eq!(mb.preview, "", "no preview after deletion");
     }
 }

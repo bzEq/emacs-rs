@@ -267,7 +267,8 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         } else {
             ""
         };
-        format!("{}{}{}", mb.prompt, mb.input, caret)
+        // caret sits between the typed input and the completion preview
+        format!("{}{}{}{}", mb.prompt, mb.input, caret, mb.preview)
     } else if let Some(emacs_core::minibuffer::Pending::YesNo { prompt, .. }) = ed.pending() {
         prompt.clone()
     } else if let Some(msg) = ed.echo() {

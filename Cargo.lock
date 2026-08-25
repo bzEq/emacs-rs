@@ -335,6 +335,7 @@ dependencies = [
  "emacs-core",
  "emacs-lua",
  "emacs-ui",
+ "libc",
  "ratatui",
 ]
 
