@@ -1,0 +1,12 @@
+[package]
+name = "emacs-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ropey.workspace = true
+anyhow.workspace = true
+bitflags.workspace = true
+
+[dev-dependencies]
