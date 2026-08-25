@@ -15,6 +15,26 @@ fn open_dired(em: &mut Em, dir: &str) {
 }
 
 #[test]
+fn find_file_on_directory_opens_dired() {
+    let em = Em::spawn();
+    let d = em.scratch.join("work");
+    std::fs::create_dir(&d).unwrap();
+    std::fs::write(d.join("alpha.txt"), "aaa").unwrap();
+    let d_s = d.to_string_lossy().into_owned();
+    let mut em = Em::spawn();
+    assert!(em.wait_for("lines", 5000), "editor ready");
+    em.keys(b"\x18\x06"); // C-x C-f
+    em.type_str(&d_s);
+    em.keys(b"\r");
+    assert!(
+        em.wait_for("alpha.txt", 5000),
+        "find-file on a directory shows dired"
+    );
+    assert!(em.wait_for("(dired-mode)", 3000), "dired-mode active");
+    em.quit();
+}
+
+#[test]
 fn listing_shows_entries() {
     let em = Em::spawn();
     let d = em.scratch.join("work");

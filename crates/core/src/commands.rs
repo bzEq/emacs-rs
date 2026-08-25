@@ -425,6 +425,10 @@ fn find_file(ed: &mut Editor) -> Result<()> {
                 cur,
                 Box::new(move |ed| {
                     let path = PathBuf::from(name);
+                    // opening a directory runs dired on it (Emacs behavior)
+                    if path.is_dir() {
+                        return crate::dired::open_dir(ed, &path, false);
+                    }
                     if let Some(idx) = ed.find_buffer_by_path(&path) {
                         let id = ed.buffers()[idx].id;
                         ed.set_selected_buffer(id);
