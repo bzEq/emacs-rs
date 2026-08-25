@@ -77,7 +77,7 @@ fn main() -> Result<()> {
         hook(info);
     }));
 
-    let mut ed = Editor::new(size.height.saturating_sub(1) as usize, size.width as usize);
+    let mut ed = Editor::new(size.height.saturating_sub(2) as usize, size.width as usize);
 
     // LuaJIT scripting engine + init.lua
     match LuaHost::new() {
@@ -148,7 +148,7 @@ fn run(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
                 }
             }
             Event::Resize(w, h) => {
-                ed.set_window_size(h.saturating_sub(1) as usize, w as usize);
+                ed.set_window_size(h.saturating_sub(2) as usize, w as usize);
             }
             _ => {}
         }

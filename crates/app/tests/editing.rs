@@ -75,7 +75,7 @@ fn modified_quit_prompts() {
 
 #[test]
 fn kill_line_and_yank() {
-    let em = Em::spawn();
+    let mut em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "hello world\n");
     let path_s = path.to_string_lossy().into_owned();
     let mut em = Em::spawn_with_args(&[&path_s]);
@@ -85,5 +85,25 @@ fn kill_line_and_yank() {
     assert!(em.wait_for_row(0, "", 3000), "line killed");
     em.keys(b"\x19"); // C-y
     assert!(em.wait_for_row(0, "hello world", 3000), "yanked back");
+    em.quit();
+}
+
+#[test]
+fn cursor_stays_out_of_the_modeline_at_buffer_end() {
+    let em = Em::spawn();
+    let content: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let path = write_file(&em.scratch, "t.txt", &content);
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("line 0", 5000));
+    em.keys(b"\x1b>"); // M-> to the last line
+    assert!(em.wait_for("line 39", 3000), "last line visible");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, y) = em.last_cursor_pos().unwrap_or((0, 0));
+    // 24-row terminal: buffer rows 1..=22, modeline 23, echo 24
+    assert!(
+        y <= 22,
+        "cursor y={y} must stay inside the buffer area, off the modeline"
+    );
     em.quit();
 }

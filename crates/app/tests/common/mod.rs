@@ -310,6 +310,37 @@ impl Em {
         self.raw.windows(needle.len()).any(|w| w == needle)
     }
 
+    /// The last cursor position `em` requested, as 1-based (x, y) terminal
+    /// coordinates (the final `ESC[r;cH` of the latest frame).
+    pub fn last_cursor_pos(&mut self) -> Option<(u16, u16)> {
+        self.drain();
+        let mut last = None;
+        let mut i = 0;
+        while i < self.raw.len() {
+            if self.raw[i] == 0x1b && i + 1 < self.raw.len() && self.raw[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < self.raw.len() && !(0x40..=0x7e).contains(&self.raw[j]) {
+                    j += 1;
+                }
+                if j < self.raw.len() && (self.raw[j] == b'H' || self.raw[j] == b'f') {
+                    let params = String::from_utf8_lossy(&self.raw[i + 2..j]);
+                    let parts: Vec<&str> = params.split(';').collect();
+                    if let Some(Ok(r)) = parts.first().map(|p| p.parse::<u16>()) {
+                        let c = parts
+                            .get(1)
+                            .and_then(|p| p.parse::<u16>().ok())
+                            .unwrap_or(1);
+                        last = Some((c, r));
+                    }
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+        last
+    }
+
     /// Quit the editor: C-x C-c, answering `n` to any confirmation prompts.
     pub fn quit(&mut self) {
         self.keys(b"\x18\x03");
