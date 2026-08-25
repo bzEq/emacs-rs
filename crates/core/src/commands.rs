@@ -19,12 +19,11 @@ fn n_repeat(ed: &Editor, default: usize) -> usize {
 fn confirm_save(ed: &mut Editor, idx: usize, cont: Box<dyn FnOnce(&mut Editor) -> Result<()>>) {
     let name = ed.buffers()[idx].name().to_string();
     if ed.buffers()[idx].modified() {
-        ed.set_current(idx);
         ed.read_yes_no(
             format!("Buffer {name} modified; save it? (y/n)"),
             Box::new(move |ed, yes| {
                 if yes {
-                    let res = ed.save_buffer_at(ed.current_idx());
+                    let res = ed.save_buffer_at(idx);
                     if res.is_ok() {
                         cont(ed)
                     } else {
@@ -298,6 +297,47 @@ fn keyboard_quit(ed: &mut Editor) -> Result<()> {
     Ok(())
 }
 
+// --- windows ---------------------------------------------------------------
+
+fn split_window_below(ed: &mut Editor) -> Result<()> {
+    ed.split_window(crate::window::Split::Vertical);
+    Ok(())
+}
+
+fn split_window_right(ed: &mut Editor) -> Result<()> {
+    ed.split_window(crate::window::Split::Horizontal);
+    Ok(())
+}
+
+fn delete_window(ed: &mut Editor) -> Result<()> {
+    if !ed.delete_window() {
+        ed.error("Attempt to delete the sole window");
+    }
+    Ok(())
+}
+
+fn delete_other_windows(ed: &mut Editor) -> Result<()> {
+    ed.delete_other_windows();
+    Ok(())
+}
+
+fn other_window(ed: &mut Editor) -> Result<()> {
+    ed.other_window();
+    Ok(())
+}
+
+// --- isearch ---------------------------------------------------------------
+
+fn isearch_forward(ed: &mut Editor) -> Result<()> {
+    ed.start_isearch(true);
+    Ok(())
+}
+
+fn isearch_backward(ed: &mut Editor) -> Result<()> {
+    ed.start_isearch(false);
+    Ok(())
+}
+
 fn universal_argument(ed: &mut Editor) -> Result<()> {
     let mut arg = ed.prefix_arg();
     arg.universal += 1;
@@ -321,7 +361,7 @@ fn negative_argument(ed: &mut Editor) -> Result<()> {
 // --- files / buffers -------------------------------------------------------
 
 fn find_file(ed: &mut Editor) -> Result<()> {
-    let cur = ed.current_idx();
+    let cur = ed.selected_buffer_index();
     ed.read_string(
         "Find file: ",
         None,
@@ -335,13 +375,15 @@ fn find_file(ed: &mut Editor) -> Result<()> {
                 Box::new(move |ed| {
                     let path = PathBuf::from(name);
                     if let Some(idx) = ed.find_buffer_by_path(&path) {
-                        ed.set_current(idx);
+                        let id = ed.buffers()[idx].id;
+                        ed.set_selected_buffer(id);
                         return Ok(());
                     }
                     match crate::buffer::Buffer::load_file(&path) {
                         Ok(buf) => {
-                            let idx = ed.add_buffer(buf);
-                            ed.set_current(idx);
+                            let id = buf.id;
+                            ed.add_buffer(buf);
+                            ed.set_selected_buffer(id);
                             Ok(())
                         }
                         Err(e) => {
@@ -358,12 +400,12 @@ fn find_file(ed: &mut Editor) -> Result<()> {
 }
 
 fn save_buffer(ed: &mut Editor) -> Result<()> {
-    let idx = ed.current_idx();
+    let idx = ed.selected_buffer_index();
     ed.save_buffer_at(idx)
 }
 
 fn write_file(ed: &mut Editor) -> Result<()> {
-    let cur = ed.current_idx();
+    let cur_id = ed.selected_buffer_id();
     let default = ed.current_buf_path().unwrap_or_default();
     let prompt = format!("Write file: {} ", default.display());
     ed.read_string(
@@ -378,16 +420,17 @@ fn write_file(ed: &mut Editor) -> Result<()> {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| name.clone());
-            ed.buffers_mut()[cur].set_path(Some(path));
-            ed.buffers_mut()[cur].set_name(file_name);
-            ed.save_buffer_at(cur)
+            let idx = ed.buffer_index(cur_id);
+            ed.buffers_mut()[idx].set_path(Some(path));
+            ed.buffers_mut()[idx].set_name(file_name);
+            ed.save_buffer_at(idx)
         }),
     );
     Ok(())
 }
 
 fn switch_to_buffer(ed: &mut Editor) -> Result<()> {
-    let cur = ed.current_idx();
+    let cur = ed.selected_buffer_index();
     ed.read_string(
         "Switch to buffer: ",
         Some(complete_buffer_names),
@@ -412,7 +455,7 @@ fn switch_to_buffer(ed: &mut Editor) -> Result<()> {
 }
 
 fn kill_buffer(ed: &mut Editor) -> Result<()> {
-    let cur = ed.current_idx();
+    let cur = ed.selected_buffer_index();
     let default = ed.buffers()[cur].name().to_string();
     let prompt = format!("Kill buffer (default {default}): ");
     ed.read_string(
@@ -518,14 +561,16 @@ fn describe_bindings(ed: &mut Editor) -> Result<()> {
         let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
         text.push_str(&format!("{}\t\t{}\n", seqs.join(" "), cmd));
     }
-    if let Some(idx) = ed.buffers().iter().position(|b| b.name() == "*Help*") {
-        ed.set_current(idx);
+    let id = if let Some(idx) = ed.buffers().iter().position(|b| b.name() == "*Help*") {
+        ed.buffers()[idx].id
     } else {
         let mut buf = crate::buffer::Buffer::new("*Help*");
         buf.set_read_only(true);
-        let idx = ed.add_buffer(buf);
-        ed.set_current(idx);
-    }
+        let id = buf.id;
+        ed.add_buffer(buf);
+        id
+    };
+    ed.set_selected_buffer(id);
     ed.buf_mut().set_modified(false);
     ed.buf_mut().move_to_buffer_start();
     ed.buf_mut().insert(&text);
@@ -720,6 +765,43 @@ pub fn register_defaults(ed: &mut Editor) {
         negative_argument,
         "Begin a negative numeric argument."
     );
+    register!(
+        ed,
+        "split-window-below",
+        split_window_below,
+        "Split the selected window in two, one above the other."
+    );
+    register!(
+        ed,
+        "split-window-right",
+        split_window_right,
+        "Split the selected window in two, side by side."
+    );
+    register!(
+        ed,
+        "delete-window",
+        delete_window,
+        "Delete the selected window."
+    );
+    register!(
+        ed,
+        "delete-other-windows",
+        delete_other_windows,
+        "Make the selected window fill its frame."
+    );
+    register!(ed, "other-window", other_window, "Select the next window.");
+    register!(
+        ed,
+        "isearch-forward",
+        isearch_forward,
+        "Incremental search forward."
+    );
+    register!(
+        ed,
+        "isearch-backward",
+        isearch_backward,
+        "Incremental search backward."
+    );
     // files
     register!(ed, "find-file", find_file, "Open a file.");
     register!(
@@ -837,6 +919,15 @@ pub fn register_defaults(ed: &mut Editor) {
     b(km, "M-x", "execute-extended-command");
     b(km, "C-h k", "describe-key");
     b(km, "C-h b", "describe-bindings");
+    // windows
+    b(km, "C-x 2", "split-window-below");
+    b(km, "C-x 3", "split-window-right");
+    b(km, "C-x 0", "delete-window");
+    b(km, "C-x 1", "delete-other-windows");
+    b(km, "C-x o", "other-window");
+    // search
+    b(km, "C-s", "isearch-forward");
+    b(km, "C-r", "isearch-backward");
     for d in 1..=9u64 {
         let c = (b'0' + d as u8) as char;
         b(km, &format!("C-{c}"), &format!("digit-argument-{d}"));
@@ -847,9 +938,8 @@ pub fn register_defaults(ed: &mut Editor) {
 impl Editor {
     /// Save the buffer at `idx`, asking for a file name if it has none.
     pub fn save_buffer_at(&mut self, idx: usize) -> Result<()> {
-        self.set_current(idx);
-        if self.buf().path().is_none() {
-            let idx = self.current_idx();
+        if self.buffers()[idx].path().is_none() {
+            let id = self.buffers()[idx].id;
             self.read_string(
                 "File to save in: ",
                 None,
@@ -862,6 +952,7 @@ impl Editor {
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| name.clone());
+                    let idx = ed.buffer_index(id);
                     ed.buffers_mut()[idx].set_path(Some(path));
                     ed.buffers_mut()[idx].set_name(file_name);
                     ed.save_buffer_now(idx)
@@ -895,20 +986,19 @@ impl Editor {
         }
     }
 
-    /// Kill the buffer at `idx`, switching away if it is current.
+    /// Kill the buffer at `idx`, pointing any windows that displayed it at
+    /// another buffer.
     pub fn kill_buffer_at(&mut self, idx: usize) {
-        let cur_id = self.buffers()[self.current_idx()].id;
         let kill_id = self.buffers()[idx].id;
         self.remove_buffer(idx);
-        self.remove_view(kill_id);
-        let n = self.buffers().len();
-        if n == 0 {
-            self.add_buffer(crate::buffer::Buffer::new("*scratch*"));
-            self.set_current(0);
-        } else if cur_id == kill_id {
-            self.set_current(idx.min(n - 1));
-        } else if self.current_idx() > idx {
-            self.set_current(self.current_idx() - 1);
+        if self.buffers().is_empty() {
+            let scratch = crate::buffer::Buffer::new("*scratch*");
+            let sid = scratch.id;
+            self.add_buffer(scratch);
+            self.replace_buffer_in_windows(kill_id, sid);
+        } else {
+            let keep_id = self.buffers()[0].id;
+            self.replace_buffer_in_windows(kill_id, keep_id);
         }
     }
 }

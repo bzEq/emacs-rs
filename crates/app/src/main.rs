@@ -60,8 +60,9 @@ fn main() -> Result<()> {
     if let Some(path) = file_arg {
         match emacs_core::buffer::Buffer::load_file(&path) {
             Ok(buf) => {
-                let idx = ed.add_buffer(buf);
-                ed.set_current(idx);
+                let id = buf.id;
+                ed.add_buffer(buf);
+                ed.set_selected_buffer(id);
             }
             Err(e) => ed.error(format!("cannot open {path}: {e}")),
         }
@@ -153,6 +154,7 @@ fn to_key(ke: &crossterm::event::KeyEvent) -> Option<Key> {
 /// One key press into the current input state (minibuffer, pending prompt,
 /// or the normal keymap).
 fn handle_key(ed: &mut Editor, key: Key) -> Result<()> {
+    let key = translate_after_ctrl_x(ed, key);
     // Esc acts as a Meta prefix (ESC x == M-x).
     if key.code == KeyCode::Esc && key.mods.is_empty() {
         if ed.esc_prefix() {
@@ -174,7 +176,38 @@ fn handle_key(ed: &mut Editor, key: Key) -> Result<()> {
     dispatch(ed, key)
 }
 
+/// Terminals can't send Ctrl+<digit> distinctly (Ctrl+2 is byte 0x00, Ctrl+3
+/// is ESC, ...), so after a C-x prefix we translate the raw bytes into the
+/// plain digit keys the keymap expects. This is what makes C-x 2 / C-x 3
+/// work on a terminal.
+fn translate_after_ctrl_x(ed: &Editor, key: Key) -> Key {
+    if ed.pending_keys().len() == 1 && ed.pending_keys()[0] == Key::ctrl('x') {
+        let m = key.mods;
+        match key.code {
+            KeyCode::Char(' ') if m.contains(Modifiers::CONTROL) => Key::plain('2'),
+            KeyCode::Esc => Key::plain('3'),
+            KeyCode::Char('\\') if m.contains(Modifiers::CONTROL) => Key::plain('4'),
+            KeyCode::Char(']') if m.contains(Modifiers::CONTROL) => Key::plain('5'),
+            KeyCode::Char('^') if m.contains(Modifiers::CONTROL) => Key::plain('6'),
+            KeyCode::Char('_') if m.contains(Modifiers::CONTROL) => Key::plain('7'),
+            KeyCode::Backspace => Key::plain('8'),
+            _ => key,
+        }
+    } else {
+        key
+    }
+}
+
 fn dispatch(ed: &mut Editor, key: Key) -> Result<()> {
+    if ed.isearch_active() {
+        match emacs_core::isearch::handle_key(ed, &key)? {
+            emacs_core::isearch::ISearchResult::Consumed => return Ok(()),
+            emacs_core::isearch::ISearchResult::Exit { replay: Some(k) } => {
+                return dispatch(ed, k);
+            }
+            emacs_core::isearch::ISearchResult::Exit { replay: None } => return Ok(()),
+        }
+    }
     if ed.minibuffer().is_some() {
         return minibuffer_key(ed, key);
     }

@@ -164,7 +164,8 @@ impl LuaHost {
             "save_buffer",
             lua.create_function(|lua, ()| {
                 let ed = editor_ref(lua)?;
-                ed.save_buffer_now(ed.current_idx())
+                let idx = ed.selected_buffer_index();
+                ed.save_buffer_now(idx)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
         )?;

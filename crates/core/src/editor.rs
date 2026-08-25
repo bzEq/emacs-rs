@@ -1,20 +1,21 @@
-//! The Editor: all global editor state — buffers, keymap, commands, kill
-//! ring, echo area, minibuffer, prefix argument, views, and the optional
+//! The Editor: all global editor state — buffers, windows, keymap, commands,
+//! kill ring, echo area, minibuffer, prefix argument, and the optional
 //! scripting host.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use crate::buffer::Buffer;
 use crate::command::CommandRegistry;
+use crate::isearch::ISearch;
 use crate::key::Key;
 use crate::keymap::Keymap;
 use crate::kill_ring::KillRing;
 use crate::minibuffer::{BoolContinuation, CompletionFn, Minibuffer, Pending, StringContinuation};
 use crate::script::{NullHost, ScriptHost};
 use crate::view::View;
+use crate::window::{Rect as WinRect, Split, WindowTree};
 
 /// Numeric prefix argument state (C-u, C-3, M--, ...).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,9 +46,17 @@ impl PrefixArg {
     }
 }
 
+/// One window's rendering info, handed to the UI.
+pub struct WindowLayout<'a> {
+    pub buf: &'a Buffer,
+    pub view: &'a View,
+    pub rect: WinRect,
+    pub selected: bool,
+}
+
 pub struct Editor {
     buffers: Vec<Buffer>,
-    current: usize,
+    windows: WindowTree,
     keymap: Keymap,
     commands: CommandRegistry,
     kill_ring: KillRing,
@@ -69,19 +78,21 @@ pub struct Editor {
     /// Char passed to self-insert-command.
     self_insert_char: Option<char>,
     quit: bool,
-    /// Per-buffer window scroll state, keyed by buffer id.
-    views: HashMap<usize, View>,
-    /// Rows/cols of the buffer area (total terminal size minus echo line).
+    /// Rows/cols of the buffer area (terminal size minus modeline + echo).
     window_rows: usize,
     window_cols: usize,
+    /// Active incremental search state.
+    isearch: Option<ISearch>,
     script: Option<Box<dyn ScriptHost>>,
 }
 
 impl Editor {
     pub fn new(window_rows: usize, window_cols: usize) -> Self {
+        let scratch = Buffer::new("*scratch*");
+        let scratch_id = scratch.id;
         let mut ed = Editor {
-            buffers: vec![Buffer::new("*scratch*")],
-            current: 0,
+            buffers: vec![scratch],
+            windows: WindowTree::new(scratch_id),
             keymap: Keymap::new(),
             commands: CommandRegistry::new(),
             kill_ring: KillRing::new(),
@@ -97,9 +108,9 @@ impl Editor {
             last_command: String::new(),
             self_insert_char: None,
             quit: false,
-            views: HashMap::new(),
             window_rows,
             window_cols,
+            isearch: None,
             script: None,
         };
         crate::commands::register_defaults(&mut ed);
@@ -116,33 +127,68 @@ impl Editor {
         &mut self.buffers
     }
 
+    /// Index into `buffers` of the buffer with the given id.
+    pub fn buffer_index(&self, id: usize) -> usize {
+        self.buffers
+            .iter()
+            .position(|b| b.id == id)
+            .expect("buffer id exists")
+    }
+
+    /// The buffer shown in the selected window.
     pub fn buf(&self) -> &Buffer {
-        &self.buffers[self.current]
+        let id = self.windows.selected_buffer();
+        &self.buffers[self.buffer_index(id)]
     }
 
     pub fn buf_mut(&mut self) -> &mut Buffer {
-        &mut self.buffers[self.current]
+        let id = self.windows.selected_buffer();
+        let idx = self.buffer_index(id);
+        &mut self.buffers[idx]
     }
 
-    pub fn set_current(&mut self, idx: usize) {
-        self.current = idx.min(self.buffers.len() - 1);
+    pub fn selected_buffer_id(&self) -> usize {
+        self.windows.selected_buffer()
     }
 
-    pub fn current_idx(&self) -> usize {
-        self.current
+    pub fn selected_buffer_index(&self) -> usize {
+        let id = self.windows.selected_buffer();
+        self.buffer_index(id)
     }
 
-    /// Switch to a buffer by name; creates it if `create` is true.
+    /// Show `id` in the selected window, preserving window-points.
+    pub fn set_selected_buffer(&mut self, id: usize) {
+        let old_id = self.windows.selected_buffer();
+        if old_id == id {
+            return;
+        }
+        let old_idx = self.buffer_index(old_id);
+        let new_idx = self.buffer_index(id);
+        let point = self.buffers[old_idx].point();
+        let w = self.windows.selected_mut();
+        w.point = Some(point);
+        w.buffer = id;
+        let saved = w.point.take();
+        if let Some(p) = saved {
+            self.buffers[new_idx].set_point(p);
+        }
+    }
+
+    /// Switch the selected window to a buffer by name; creates it if
+    /// `create` is true.
     pub fn switch_to_buffer(&mut self, name: &str, create: bool) -> Result<()> {
         if let Some(idx) = self.buffers.iter().position(|b| b.name() == name) {
-            self.current = idx;
+            let id = self.buffers[idx].id;
+            self.set_selected_buffer(id);
             return Ok(());
         }
         if !create {
             return Err(anyhow::anyhow!("no buffer named {name}"));
         }
-        self.buffers.push(Buffer::new(name.to_string()));
-        self.current = self.buffers.len() - 1;
+        let buf = Buffer::new(name.to_string());
+        let id = buf.id;
+        self.buffers.push(buf);
+        self.set_selected_buffer(id);
         Ok(())
     }
 
@@ -156,23 +202,90 @@ impl Editor {
         self.buffers.len() - 1
     }
 
-    /// Remove the buffer at `idx` (caller handles switching).
+    /// Remove the buffer at `idx` (caller handles windows).
     pub fn remove_buffer(&mut self, idx: usize) {
         self.buffers.remove(idx);
     }
 
-    pub fn remove_view(&mut self, buffer_id: usize) {
-        self.views.remove(&buffer_id);
+    /// Point all windows showing `old_id` at `new_id` (buffer killed).
+    pub fn replace_buffer_in_windows(&mut self, old_id: usize, new_id: usize) {
+        self.windows.replace_buffer(old_id, new_id);
     }
 
-    // --- views -------------------------------------------------------------
+    // --- windows -----------------------------------------------------------
 
-    pub fn view(&self) -> &View {
-        self.views.get(&self.buf().id).unwrap_or(&View::DEFAULT)
+    pub fn window_layout(&self) -> Vec<WindowLayout<'_>> {
+        let body = self.body_rect();
+        let selected = self.windows.selected_path().to_vec();
+        self.windows
+            .layout(body)
+            .into_iter()
+            .map(|(path, w, rect)| {
+                let idx = self.buffer_index(w.buffer);
+                WindowLayout {
+                    buf: &self.buffers[idx],
+                    view: &w.view,
+                    rect,
+                    selected: path == selected,
+                }
+            })
+            .collect()
     }
 
-    pub fn view_mut(&mut self) -> &mut View {
-        self.views.entry(self.buf().id).or_default()
+    pub fn body_rect(&self) -> WinRect {
+        WinRect {
+            x: 0,
+            y: 0,
+            w: self.window_cols as u16,
+            h: self.window_rows as u16,
+        }
+    }
+
+    /// Height of the selected window, for scrolling commands.
+    pub fn selected_window_height(&self) -> usize {
+        self.window_layout()
+            .into_iter()
+            .find(|l| l.selected)
+            .map(|l| l.rect.h as usize)
+            .unwrap_or(self.window_rows)
+            .max(1)
+    }
+
+    pub fn split_window(&mut self, split: Split) {
+        let point = self.buf().point();
+        self.windows.split(split, point);
+    }
+
+    pub fn delete_window(&mut self) -> bool {
+        self.windows.delete_selected()
+    }
+
+    pub fn delete_other_windows(&mut self) {
+        self.windows.delete_others();
+    }
+
+    /// Cycle to the next window (C-x o), preserving window-points. Returns
+    /// false if there is only one window.
+    pub fn other_window(&mut self) -> bool {
+        let old_id = self.windows.selected_buffer();
+        let old_idx = self.buffer_index(old_id);
+        let point = self.buffers[old_idx].point();
+        self.windows.selected_mut().point = Some(point);
+        if !self.windows.next() {
+            return false;
+        }
+        let new_id = self.windows.selected_buffer();
+        let new_idx = self.buffer_index(new_id);
+        let saved = self.windows.selected().point;
+        if let Some(p) = saved {
+            self.buffers[new_idx].set_point(p);
+            self.windows.selected_mut().point = None;
+        }
+        true
+    }
+
+    pub fn single_window(&self) -> bool {
+        self.windows.is_single()
     }
 
     pub fn window_rows(&self) -> usize {
@@ -188,33 +301,41 @@ impl Editor {
         self.window_cols = cols;
     }
 
-    /// Keep the current buffer's view scrolled so the cursor is visible.
+    /// Keep the selected window's view scrolled so the cursor is visible.
     pub fn scroll_current_view(&mut self) {
-        let rows = self.window_rows;
-        let buf = &mut self.buffers[self.current];
-        let view = self.views.entry(buf.id).or_default();
-        view.scroll_to_cursor(buf, rows);
+        let id = self.windows.selected_buffer();
+        let idx = self.buffer_index(id);
+        let rows = self.selected_window_height();
+        let buf = &mut self.buffers[idx];
+        let w = self.windows.selected_mut();
+        w.view.scroll_to_cursor(buf, rows);
     }
 
     pub fn page_down_current(&mut self) {
-        let rows = self.window_rows;
-        let buf = &mut self.buffers[self.current];
-        let view = self.views.entry(buf.id).or_default();
-        view.page_down(buf, rows);
+        let id = self.windows.selected_buffer();
+        let idx = self.buffer_index(id);
+        let rows = self.selected_window_height();
+        let buf = &mut self.buffers[idx];
+        let w = self.windows.selected_mut();
+        w.view.page_down(buf, rows);
     }
 
     pub fn page_up_current(&mut self) {
-        let rows = self.window_rows;
-        let buf = &mut self.buffers[self.current];
-        let view = self.views.entry(buf.id).or_default();
-        view.page_up(buf, rows);
+        let id = self.windows.selected_buffer();
+        let idx = self.buffer_index(id);
+        let rows = self.selected_window_height();
+        let buf = &mut self.buffers[idx];
+        let w = self.windows.selected_mut();
+        w.view.page_up(buf, rows);
     }
 
     pub fn recenter_current(&mut self) {
-        let rows = self.window_rows;
-        let buf = &self.buffers[self.current];
-        let view = self.views.entry(buf.id).or_default();
-        view.recenter(buf, rows);
+        let id = self.windows.selected_buffer();
+        let idx = self.buffer_index(id);
+        let rows = self.selected_window_height();
+        let buf = &self.buffers[idx];
+        let w = self.windows.selected_mut();
+        w.view.recenter(buf, rows);
     }
 
     // --- keymap / commands -------------------------------------------------
@@ -243,7 +364,7 @@ impl Editor {
             None => return Err(anyhow::anyhow!("{name} is undefined")),
         };
         if self.last_command != name {
-            self.buffers[self.current].undo_boundary();
+            self.buf_mut().undo_boundary();
         }
         self.last_command = std::mem::take(&mut self.this_command);
         self.this_command = name.to_string();
@@ -407,6 +528,29 @@ impl Editor {
         self.clear_pending_keys();
     }
 
+    // --- isearch -----------------------------------------------------------
+
+    pub fn isearch(&self) -> Option<&ISearch> {
+        self.isearch.as_ref()
+    }
+
+    pub fn isearch_active(&self) -> bool {
+        self.isearch.is_some()
+    }
+
+    pub fn set_isearch(&mut self, is: Option<ISearch>) {
+        self.isearch = is;
+    }
+
+    pub fn take_isearch(&mut self) -> Option<ISearch> {
+        self.isearch.take()
+    }
+
+    pub fn start_isearch(&mut self, forward: bool) {
+        let point = self.buf().point();
+        self.isearch = Some(ISearch::new(forward, point));
+    }
+
     // --- kill ring ---------------------------------------------------------
 
     pub fn kill_ring(&self) -> &KillRing {
@@ -471,14 +615,10 @@ impl Editor {
         res
     }
 
-    /// Convenience: mark the current buffer read-only (for *Help*).
+    /// Convenience: path of the selected window's buffer.
     pub fn current_buf_path(&self) -> Option<PathBuf> {
         self.buf().path().map(|p| p.to_path_buf())
     }
-}
-
-impl View {
-    pub const DEFAULT: View = View { top_line: 0 };
 }
 
 #[cfg(test)]
@@ -556,5 +696,33 @@ mod tests {
         assert!(ed.esc_prefix());
         ed.set_esc_prefix(false);
         assert!(!ed.esc_prefix());
+    }
+
+    #[test]
+    fn split_windows_share_buffer() {
+        let mut ed = Editor::new(20, 80);
+        ed.buf_mut().insert("abc");
+        let id = ed.selected_buffer_id();
+        ed.split_window(crate::window::Split::Vertical);
+        assert_eq!(ed.window_layout().len(), 2);
+        assert_eq!(ed.selected_buffer_id(), id);
+        assert!(!ed.single_window());
+    }
+
+    #[test]
+    fn window_point_preserved() {
+        let mut ed = Editor::new(20, 80);
+        ed.buf_mut().insert("hello world");
+        ed.buf_mut().move_to_buffer_start();
+        ed.buf_mut().move_char(crate::buffer::Direction::Forward);
+        ed.split_window(crate::window::Split::Vertical);
+        // new window starts at the shared point
+        assert_eq!(ed.buf().point(), 1);
+        ed.buf_mut().move_char(crate::buffer::Direction::Forward);
+        assert_eq!(ed.buf().point(), 2);
+        assert!(ed.other_window());
+        assert_eq!(ed.buf().point(), 1, "old window keeps its point");
+        assert!(ed.other_window());
+        assert_eq!(ed.buf().point(), 2);
     }
 }

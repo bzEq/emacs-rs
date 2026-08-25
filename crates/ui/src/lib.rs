@@ -1,6 +1,7 @@
-//! Terminal rendering: buffer window, echo area / minibuffer, cursor.
+//! Terminal rendering: window tree, modeline, echo area / minibuffer, cursor.
 
 use emacs_core::editor::Editor;
+use emacs_core::view::View;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TuiLine, Span};
@@ -49,35 +50,77 @@ fn expand_tabs(s: ropey::RopeSlice<'_>) -> String {
     out
 }
 
-/// Render the editor: buffer window plus the echo area (which doubles as the
-/// minibuffer while it is active). Returns the on-screen cursor position.
-pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
-    let area = frame.area();
-    if area.height == 0 {
-        return None;
-    }
-
-    let body = Rect {
-        height: area.height.saturating_sub(1),
-        ..area
-    };
-    let echo_rect = Rect {
-        y: area.y + body.height,
-        height: area.height - body.height,
-        ..area
-    };
-
-    // --- buffer window -----------------------------------------------------
-    let buf = ed.buf();
-    let view = ed.view();
-    let lines: Vec<TuiLine> = (0..body.height as usize)
+fn render_window(frame: &mut Frame, buf: &emacs_core::buffer::Buffer, view: &View, rect: Rect) {
+    let lines: Vec<TuiLine> = (0..rect.height as usize)
         .filter_map(|i| {
             let line_idx = view.top_line + i;
             (line_idx < buf.len_lines())
                 .then(|| TuiLine::from(expand_tabs(visible_content(buf.line(line_idx)))))
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), body);
+    frame.render_widget(Paragraph::new(lines), rect);
+}
+
+/// Modeline for a buffer, Emacs-style: `--`/`**` + `%` for read-only, name,
+/// point position, line count.
+fn modeline(buf: &emacs_core::buffer::Buffer) -> String {
+    let modified = if buf.modified() { "**" } else { "--" };
+    let ro = if buf.read_only() { "%" } else { "-" };
+    let file = buf
+        .path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| buf.name().to_string());
+    format!(
+        "-{modified}{ro}-  {file}  L{} C{}  {} lines",
+        buf.line_of_point() + 1,
+        buf.column(),
+        buf.len_lines()
+    )
+}
+
+/// Render the editor: all windows, modeline, echo area (which doubles as the
+/// minibuffer). Returns the on-screen cursor position.
+pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
+    let area = frame.area();
+    if area.height == 0 {
+        return None;
+    }
+
+    let body_h = area.height.saturating_sub(2);
+    let modeline_rect = Rect {
+        y: area.y + body_h,
+        height: area.height - body_h - 1,
+        ..area
+    };
+    let echo_rect = Rect {
+        y: area.y + area.height - 1,
+        height: 1,
+        ..area
+    };
+
+    // --- windows -----------------------------------------------------------
+    let layouts = ed.window_layout();
+    for l in &layouts {
+        let rect = Rect {
+            x: l.rect.x,
+            y: l.rect.y,
+            width: l.rect.w,
+            height: l.rect.h,
+        };
+        render_window(frame, l.buf, l.view, rect);
+    }
+
+    // --- modeline ----------------------------------------------------------
+    let ml_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    if let Some(selected) = layouts.iter().find(|l| l.selected) {
+        frame.render_widget(
+            Paragraph::new(Span::styled(modeline(selected.buf), ml_style)),
+            modeline_rect,
+        );
+    }
 
     // --- echo area ---------------------------------------------------------
     let echo_style = if ed.echo_is_error() {
@@ -96,8 +139,10 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         prompt.clone()
     } else if let Some(msg) = ed.echo() {
         msg.to_string()
+    } else if ed.isearch_active() {
+        String::new()
     } else {
-        status_line(ed)
+        String::new()
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
@@ -109,42 +154,31 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
 
     // --- cursor ------------------------------------------------------------
     if let Some(mb) = ed.minibuffer() {
-        // cursor in the minibuffer
         let x = (echo_rect.x as usize + mb.prompt.chars().count() + mb.cursor)
             .min((echo_rect.x + echo_rect.width.saturating_sub(1)) as usize);
         return Some((x as u16, echo_rect.y));
     }
 
+    let selected = layouts.iter().find(|l| l.selected)?;
+    let buf = selected.buf;
+    let rect = Rect {
+        x: selected.rect.x,
+        y: selected.rect.y,
+        width: selected.rect.w,
+        height: selected.rect.h,
+    };
+    if rect.height == 0 {
+        return None;
+    }
     let line = buf.line_of_point();
-    let row = line as i64 - view.top_line as i64;
-    if row < 0 || row >= body.height as i64 {
+    let row = line as i64 - selected.view.top_line as i64;
+    if row < 0 || row >= rect.height as i64 {
         return None;
     }
     let line_slice = visible_content(buf.line(line));
     let col_chars = buf.column().min(line_slice.len_chars());
     let vis_col = visual_col(line_slice.slice(..col_chars));
-    let x = body.x + vis_col.min(body.width.saturating_sub(1) as usize) as u16;
-    let y = body.y + row as u16;
+    let x = rect.x + vis_col.min(rect.width.saturating_sub(1) as usize) as u16;
+    let y = rect.y + row as u16;
     Some((x, y))
-}
-
-fn status_line(ed: &Editor) -> String {
-    let buf = ed.buf();
-    let mb = buf.rope().len_bytes() as f64 / 1e6;
-    let modified = if buf.modified() { "**" } else { "--" };
-    let ro = if buf.read_only() { "%" } else { "" };
-    let file = buf
-        .path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| buf.name().to_string());
-    format!(
-        " {}{}{}  L{} C{}  {} lines {:.1}MB",
-        modified,
-        ro,
-        file,
-        buf.line_of_point() + 1,
-        buf.column(),
-        buf.len_lines(),
-        mb
-    )
 }
