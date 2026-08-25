@@ -307,6 +307,41 @@ fn set_mark_command(ed: &mut Editor) -> Result<()> {
     Ok(())
 }
 
+/// Move point to the beginning of line `n` (1-based), clamped to the last
+/// line; sets the mark at the previous position (Emacs goto-line).
+fn goto_line_number(ed: &mut Editor, n: usize) {
+    let buf = ed.buf_mut();
+    let old = buf.point();
+    let line = n.saturating_sub(1).min(buf.len_lines() - 1);
+    let start = buf.rope().line_to_char(line);
+    buf.set_mark(Some(old));
+    buf.set_point(start);
+    let line = buf.line_of_point() + 1;
+    ed.message(format!("Goto line {line}"));
+}
+
+fn goto_line(ed: &mut Editor) -> Result<()> {
+    // a prefix argument supplies the line number directly
+    if ed.prefix_arg().is_active() {
+        let n = ed.prefix_arg().value().max(1) as usize;
+        goto_line_number(ed, n);
+        return Ok(());
+    }
+    let max = ed.buf().len_lines();
+    ed.read_string(
+        format!("Goto line (1-{max}): "),
+        None,
+        Box::new(|ed, input| {
+            match input.trim().parse::<usize>() {
+                Ok(n) => goto_line_number(ed, n),
+                Err(_) => ed.error("not a number"),
+            }
+            Ok(())
+        }),
+    );
+    Ok(())
+}
+
 fn exchange_point_and_mark(ed: &mut Editor) -> Result<()> {
     ed.buf_mut().exchange_point_and_mark();
     Ok(())
@@ -838,6 +873,12 @@ pub fn register_defaults(ed: &mut Editor) {
     );
     register!(
         ed,
+        "goto-line",
+        goto_line,
+        "Move point to the beginning of a line, setting the mark."
+    );
+    register!(
+        ed,
         "exchange-point-and-mark",
         exchange_point_and_mark,
         "Swap point and mark."
@@ -1014,6 +1055,7 @@ pub fn register_defaults(ed: &mut Editor) {
     b(km, "C-SPC", "set-mark-command");
     b(km, "C-@", "set-mark-command");
     b(km, "C-g", "keyboard-quit");
+    b(km, "M-g M-g", "goto-line");
     b(km, "C-u", "universal-argument");
     b(km, "C--", "negative-argument");
     b(km, "M--", "negative-argument");
@@ -1195,5 +1237,29 @@ mod tests {
         ed.invoke_command("digit-argument-3").unwrap();
         ed.invoke_command("forward-char").unwrap();
         assert_eq!(ed.buf().point(), 3);
+    }
+
+    #[test]
+    fn goto_line_via_prefix_arg() {
+        let mut ed = Editor::new(20, 80);
+        let content: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+        ed.buf_mut().insert(&content);
+        ed.buf_mut().move_to_buffer_start();
+        ed.buf_mut().move_char(Direction::Forward);
+        ed.invoke_command("digit-argument-5").unwrap();
+        ed.invoke_command("goto-line").unwrap();
+        assert_eq!(ed.buf().line_of_point(), 4, "line 5 (0-based 4)");
+        assert_eq!(ed.buf().column(), 0, "at the beginning of the line");
+        assert_eq!(ed.buf().mark(), Some(1), "mark at the previous position");
+    }
+
+    #[test]
+    fn goto_line_clamps_to_last_line() {
+        let mut ed = Editor::new(20, 80);
+        ed.buf_mut().insert("a\nb\n");
+        ed.invoke_command("digit-argument-9").unwrap();
+        ed.invoke_command("digit-argument-9").unwrap(); // 99
+        ed.invoke_command("goto-line").unwrap();
+        assert_eq!(ed.buf().line_of_point(), ed.buf().len_lines() - 1);
     }
 }

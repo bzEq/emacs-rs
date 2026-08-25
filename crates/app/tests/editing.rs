@@ -75,7 +75,7 @@ fn modified_quit_prompts() {
 
 #[test]
 fn kill_line_and_yank() {
-    let mut em = Em::spawn();
+    let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "hello world\n");
     let path_s = path.to_string_lossy().into_owned();
     let mut em = Em::spawn_with_args(&[&path_s]);
@@ -104,6 +104,38 @@ fn cursor_stays_out_of_the_modeline_at_buffer_end() {
     assert!(
         y <= 22,
         "cursor y={y} must stay inside the buffer area, off the modeline"
+    );
+    em.quit();
+}
+
+#[test]
+fn goto_line_via_mgmg_prompt() {
+    let em = Em::spawn();
+    let content: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+    let path = write_file(&em.scratch, "t.txt", &content);
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("line 1", 5000));
+    em.keys(b"\x1bg\x1bg"); // M-g M-g
+    assert!(em.wait_for("Goto line", 3000), "prompt shown");
+    em.type_str("5");
+    em.keys(b"\r");
+    assert!(em.wait_for("L5 C0", 3000), "point on line 5, column 0");
+    em.quit();
+}
+
+#[test]
+fn goto_line_via_prefix_arg() {
+    let em = Em::spawn();
+    let content: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+    let path = write_file(&em.scratch, "t.txt", &content);
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("line 1", 5000));
+    em.keys(b"\x15\x1b5\x1bg\x1bg"); // C-u M-5 M-g M-g
+    assert!(
+        em.wait_for("L5 C0", 3000),
+        "prefix arg 5 jumps without prompting"
     );
     em.quit();
 }
