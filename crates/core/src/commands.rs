@@ -1019,6 +1019,8 @@ pub fn register_defaults(ed: &mut Editor) {
     b(km, "C-x 0", "delete-window");
     b(km, "C-x 1", "delete-other-windows");
     b(km, "C-x o", "other-window");
+    // dired
+    b(km, "C-x d", "dired");
     // search
     b(km, "C-s", "isearch-forward");
     b(km, "C-r", "isearch-backward");
@@ -1027,6 +1029,8 @@ pub fn register_defaults(ed: &mut Editor) {
         b(km, &format!("C-{c}"), &format!("digit-argument-{d}"));
         b(km, &format!("M-{c}"), &format!("digit-argument-{d}"));
     }
+
+    crate::dired::register(ed);
 }
 
 impl Editor {

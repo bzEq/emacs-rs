@@ -172,6 +172,15 @@ fn to_key(ke: &crossterm::event::KeyEvent) -> Option<Key> {
         crossterm::event::KeyCode::Char('7') if ke.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyCode::Char('_')
         }
+        // crossterm reports plain uppercase letters with a SHIFT modifier;
+        // terminals cannot distinguish the two, and keymaps bind the plain
+        // letter (dired's R/D/U/C, self-insert), so normalize it away.
+        crossterm::event::KeyCode::Char(c)
+            if c.is_ascii_uppercase() && mods == Modifiers::SHIFT =>
+        {
+            mods = Modifiers::empty();
+            KeyCode::Char(c)
+        }
         crossterm::event::KeyCode::Char(c) => KeyCode::Char(c),
         crossterm::event::KeyCode::Enter => KeyCode::Enter,
         crossterm::event::KeyCode::Tab => KeyCode::Tab,

@@ -58,6 +58,8 @@ pub struct Buffer {
     local_keymap: Option<Keymap>,
     /// Names of enabled minor modes, in enable order (last = most recent).
     enabled_minor: Vec<String>,
+    /// Dired directory listing state, if this is a dired buffer.
+    dired: Option<crate::dired::DiredState>,
     /// Parsed syntax tree for highlighting, if the mode has a language.
     syntax: Option<Syntax>,
     /// Set by edits while a language mode is active; triggers re-parse.
@@ -82,6 +84,7 @@ impl Buffer {
             mode: fundamental(),
             local_keymap: None,
             enabled_minor: Vec::new(),
+            dired: None,
             syntax: None,
             syntax_dirty: false,
             syntax_last_parse: None,
@@ -110,6 +113,7 @@ impl Buffer {
             mode,
             local_keymap: None,
             enabled_minor: Vec::new(),
+            dired: None,
             syntax: None,
             syntax_dirty: has_lang,
             syntax_last_parse: None,
@@ -249,6 +253,18 @@ impl Buffer {
 
     pub fn disable_minor_mode(&mut self, name: &str) {
         self.enabled_minor.retain(|m| m != name);
+    }
+
+    pub fn dired(&self) -> Option<&crate::dired::DiredState> {
+        self.dired.as_ref()
+    }
+
+    pub fn dired_mut(&mut self) -> Option<&mut crate::dired::DiredState> {
+        self.dired.as_mut()
+    }
+
+    pub fn set_dired(&mut self, dired: Option<crate::dired::DiredState>) {
+        self.dired = dired;
     }
 
     pub fn syntax(&self) -> Option<&Syntax> {

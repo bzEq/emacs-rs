@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod command;
 pub mod commands;
+pub mod dired;
 pub mod editor;
 pub mod indent;
 pub mod isearch;
