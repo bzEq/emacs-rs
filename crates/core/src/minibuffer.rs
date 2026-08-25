@@ -134,9 +134,7 @@ pub enum Pending {
         cont: BoolContinuation,
     },
     /// describe-key: reading a key sequence; resolves when complete.
-    ReadKey {
-        keys: Vec<crate::key::Key>,
-    },
+    ReadKey { keys: Vec<crate::key::Key> },
 }
 
 #[cfg(test)]

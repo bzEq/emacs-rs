@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyEventKind, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use emacs_core::editor::Editor;
 use emacs_core::key::{Key, KeyCode, Modifiers};
 use emacs_core::keymap::Lookup;
@@ -38,10 +40,7 @@ fn main() -> Result<()> {
         hook(info);
     }));
 
-    let mut ed = Editor::new(
-        size.height.saturating_sub(1) as usize,
-        size.width as usize,
-    );
+    let mut ed = Editor::new(size.height.saturating_sub(1) as usize, size.width as usize);
 
     // LuaJIT scripting engine + init.lua
     match LuaHost::new() {
@@ -262,11 +261,17 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             }
         }
         Enter => {
-            let input = ed.minibuffer().map(|mb| mb.input.clone()).unwrap_or_default();
+            let input = ed
+                .minibuffer()
+                .map(|mb| mb.input.clone())
+                .unwrap_or_default();
             ed.finish_read_string(input)?;
         }
         Tab => {
-            let input = ed.minibuffer().map(|mb| mb.input.clone()).unwrap_or_default();
+            let input = ed
+                .minibuffer()
+                .map(|mb| mb.input.clone())
+                .unwrap_or_default();
             let completer = ed.minibuffer().and_then(|mb| mb.completion);
             let candidates = completer.map(|f| f(ed, &input)).unwrap_or_default();
             if let Some(mb) = ed.minibuffer_mut() {
@@ -321,9 +326,18 @@ fn pending_key(ed: &mut Editor, key: Key) -> Result<()> {
                     let name = name.to_string();
                     let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
                     let doc = ed.commands().get(&name).map(|c| c.doc).unwrap_or("");
-                    let doc = if doc.is_empty() { String::new() } else { format!(": {doc}") };
+                    let doc = if doc.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {doc}")
+                    };
                     ed.set_pending(None);
-                    ed.message(format!("{} runs the command {}{}", seqs.join(" "), name, doc));
+                    ed.message(format!(
+                        "{} runs the command {}{}",
+                        seqs.join(" "),
+                        name,
+                        doc
+                    ));
                     resolved = true;
                 }
                 Lookup::Prefix => {

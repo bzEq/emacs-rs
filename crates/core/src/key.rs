@@ -41,19 +41,31 @@ pub struct Key {
 
 impl Key {
     pub fn plain(c: char) -> Self {
-        Key { code: KeyCode::Char(c), mods: Modifiers::empty() }
+        Key {
+            code: KeyCode::Char(c),
+            mods: Modifiers::empty(),
+        }
     }
 
     pub fn ctrl(c: char) -> Self {
-        Key { code: KeyCode::Char(c), mods: Modifiers::CONTROL }
+        Key {
+            code: KeyCode::Char(c),
+            mods: Modifiers::CONTROL,
+        }
     }
 
     pub fn alt(c: char) -> Self {
-        Key { code: KeyCode::Char(c), mods: Modifiers::ALT }
+        Key {
+            code: KeyCode::Char(c),
+            mods: Modifiers::ALT,
+        }
     }
 
     pub fn key(code: KeyCode) -> Self {
-        Key { code, mods: Modifiers::empty() }
+        Key {
+            code,
+            mods: Modifiers::empty(),
+        }
     }
 
     /// True if this key can be self-inserted when unbound.
@@ -165,15 +177,18 @@ fn parse_key(token: &str) -> Result<Key, String> {
                 "return" => KeyCode::Enter,
                 "tab" => KeyCode::Tab,
                 "backspace" => KeyCode::Backspace,
-                _ if name.starts_with('f') => {
-                    name[1..].parse().map(KeyCode::F).map_err(|_| format!("bad key: {token}"))?
-                }
+                _ if name.starts_with('f') => name[1..]
+                    .parse()
+                    .map(KeyCode::F)
+                    .map_err(|_| format!("bad key: {token}"))?,
                 _ => return Err(format!("unknown key: {token}")),
             }
         }
         _ => {
             let mut chars = rest.chars();
-            let c = chars.next().ok_or_else(|| format!("empty key token in {token}"))?;
+            let c = chars
+                .next()
+                .ok_or_else(|| format!("empty key token in {token}"))?;
             if chars.next().is_some() {
                 return Err(format!("unknown key: {token}"));
             }
@@ -195,12 +210,18 @@ mod tests {
     fn parse_basic() {
         assert_eq!(s("C-x C-f"), vec![Key::ctrl('x'), Key::ctrl('f')]);
         assert_eq!(s("M-x"), vec![Key::alt('x')]);
-        assert_eq!(s("C-M-a"), vec![Key {
-            code: KeyCode::Char('a'),
-            mods: Modifiers::CONTROL | Modifiers::ALT
-        }]);
+        assert_eq!(
+            s("C-M-a"),
+            vec![Key {
+                code: KeyCode::Char('a'),
+                mods: Modifiers::CONTROL | Modifiers::ALT
+            }]
+        );
         assert_eq!(s("RET"), vec![Key::key(KeyCode::Enter)]);
-        assert_eq!(s("<left> <f1>"), vec![Key::key(KeyCode::Left), Key::key(KeyCode::F(1))]);
+        assert_eq!(
+            s("<left> <f1>"),
+            vec![Key::key(KeyCode::Left), Key::key(KeyCode::F(1))]
+        );
         assert_eq!(s("SPC"), vec![Key::plain(' ')]);
         assert_eq!(s("x"), vec![Key::plain('x')]);
     }

@@ -16,26 +16,25 @@ fn n_repeat(ed: &Editor, default: usize) -> usize {
 }
 
 /// Confirm save of a modified buffer; runs `cont` after confirmation.
-fn confirm_save(
-    ed: &mut Editor,
-    idx: usize,
-    cont: Box<dyn FnOnce(&mut Editor) -> Result<()>>,
-) {
+fn confirm_save(ed: &mut Editor, idx: usize, cont: Box<dyn FnOnce(&mut Editor) -> Result<()>>) {
     let name = ed.buffers()[idx].name().to_string();
     if ed.buffers()[idx].modified() {
         ed.set_current(idx);
-        ed.read_yes_no(format!("Buffer {name} modified; save it? (y/n)"), Box::new(move |ed, yes| {
-            if yes {
-                let res = ed.save_buffer_at(ed.current_idx());
-                if res.is_ok() {
-                    cont(ed)
+        ed.read_yes_no(
+            format!("Buffer {name} modified; save it? (y/n)"),
+            Box::new(move |ed, yes| {
+                if yes {
+                    let res = ed.save_buffer_at(ed.current_idx());
+                    if res.is_ok() {
+                        cont(ed)
+                    } else {
+                        res
+                    }
                 } else {
-                    res
+                    cont(ed)
                 }
-            } else {
-                cont(ed)
-            }
-        }));
+            }),
+        );
     } else {
         if let Err(e) = cont(ed) {
             ed.error(e.to_string());
@@ -323,30 +322,38 @@ fn negative_argument(ed: &mut Editor) -> Result<()> {
 
 fn find_file(ed: &mut Editor) -> Result<()> {
     let cur = ed.current_idx();
-    ed.read_string("Find file: ", None, Box::new(move |ed, name| {
-        if name.is_empty() {
-            return Ok(());
-        }
-        confirm_save(ed, cur, Box::new(move |ed| {
-            let path = PathBuf::from(name);
-            if let Some(idx) = ed.find_buffer_by_path(&path) {
-                ed.set_current(idx);
+    ed.read_string(
+        "Find file: ",
+        None,
+        Box::new(move |ed, name| {
+            if name.is_empty() {
                 return Ok(());
             }
-            match crate::buffer::Buffer::load_file(&path) {
-                Ok(buf) => {
-                    let idx = ed.add_buffer(buf);
-                    ed.set_current(idx);
-                    Ok(())
-                }
-                Err(e) => {
-                    ed.error(format!("Cannot open {path:?}: {e}"));
-                    Ok(())
-                }
-            }
-        }));
-        Ok(())
-    }));
+            confirm_save(
+                ed,
+                cur,
+                Box::new(move |ed| {
+                    let path = PathBuf::from(name);
+                    if let Some(idx) = ed.find_buffer_by_path(&path) {
+                        ed.set_current(idx);
+                        return Ok(());
+                    }
+                    match crate::buffer::Buffer::load_file(&path) {
+                        Ok(buf) => {
+                            let idx = ed.add_buffer(buf);
+                            ed.set_current(idx);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            ed.error(format!("Cannot open {path:?}: {e}"));
+                            Ok(())
+                        }
+                    }
+                }),
+            );
+            Ok(())
+        }),
+    );
     Ok(())
 }
 
@@ -359,19 +366,23 @@ fn write_file(ed: &mut Editor) -> Result<()> {
     let cur = ed.current_idx();
     let default = ed.current_buf_path().unwrap_or_default();
     let prompt = format!("Write file: {} ", default.display());
-    ed.read_string(prompt, None, Box::new(move |ed, name| {
-        if name.is_empty() {
-            return Ok(());
-        }
-        let path = PathBuf::from(&name);
-        let file_name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| name.clone());
-        ed.buffers_mut()[cur].set_path(Some(path));
-        ed.buffers_mut()[cur].set_name(file_name);
-        ed.save_buffer_at(cur)
-    }));
+    ed.read_string(
+        prompt,
+        None,
+        Box::new(move |ed, name| {
+            if name.is_empty() {
+                return Ok(());
+            }
+            let path = PathBuf::from(&name);
+            let file_name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| name.clone());
+            ed.buffers_mut()[cur].set_path(Some(path));
+            ed.buffers_mut()[cur].set_name(file_name);
+            ed.save_buffer_at(cur)
+        }),
+    );
     Ok(())
 }
 
@@ -384,12 +395,16 @@ fn switch_to_buffer(ed: &mut Editor) -> Result<()> {
             if name.is_empty() {
                 return Ok(());
             }
-            confirm_save(ed, cur, Box::new(move |ed| {
-                if let Err(e) = ed.switch_to_buffer(&name, true) {
-                    ed.error(e.to_string());
-                }
-                Ok(())
-            }));
+            confirm_save(
+                ed,
+                cur,
+                Box::new(move |ed| {
+                    if let Err(e) = ed.switch_to_buffer(&name, true) {
+                        ed.error(e.to_string());
+                    }
+                    Ok(())
+                }),
+            );
             Ok(())
         }),
     );
@@ -410,12 +425,15 @@ fn kill_buffer(ed: &mut Editor) -> Result<()> {
                 return Ok(());
             };
             if ed.buffers()[idx].modified() {
-                ed.read_yes_no(format!("Buffer {name} modified; kill anyway? (y/n)"), Box::new(move |ed, yes| {
-                    if yes {
-                        ed.kill_buffer_at(idx);
-                    }
-                    Ok(())
-                }));
+                ed.read_yes_no(
+                    format!("Buffer {name} modified; kill anyway? (y/n)"),
+                    Box::new(move |ed, yes| {
+                        if yes {
+                            ed.kill_buffer_at(idx);
+                        }
+                        Ok(())
+                    }),
+                );
             } else {
                 ed.kill_buffer_at(idx);
             }
@@ -426,10 +444,14 @@ fn kill_buffer(ed: &mut Editor) -> Result<()> {
 }
 
 fn save_buffers_kill_terminal(ed: &mut Editor) -> Result<()> {
-    confirm_all_modified(ed, 0, Box::new(|ed| {
-        ed.set_quit(true);
-        Ok(())
-    }))
+    confirm_all_modified(
+        ed,
+        0,
+        Box::new(|ed| {
+            ed.set_quit(true);
+            Ok(())
+        }),
+    )
 }
 
 /// Ask about each modified buffer in turn, then run `cont`.
@@ -483,7 +505,9 @@ fn execute_extended_command(ed: &mut Editor) -> Result<()> {
 
 fn describe_key(ed: &mut Editor) -> Result<()> {
     ed.clear_pending_keys();
-    ed.set_pending(Some(crate::minibuffer::Pending::ReadKey { keys: Vec::new() }));
+    ed.set_pending(Some(crate::minibuffer::Pending::ReadKey {
+        keys: Vec::new(),
+    }));
     Ok(())
 }
 
@@ -535,48 +559,213 @@ macro_rules! digit_cmd {
 /// Register all built-in commands and the default global keymap.
 pub fn register_defaults(ed: &mut Editor) {
     // motion
-    register!(ed, "forward-char", forward_char, "Move point forward one character.");
-    register!(ed, "backward-char", backward_char, "Move point backward one character.");
-    register!(ed, "next-line", next_line, "Move point down one line, preserving column.");
-    register!(ed, "previous-line", previous_line, "Move point up one line, preserving column.");
-    register!(ed, "move-beginning-of-line", move_beginning_of_line, "Move point to beginning of line.");
-    register!(ed, "move-end-of-line", move_end_of_line, "Move point to end of line.");
-    register!(ed, "forward-word", forward_word, "Move point forward one word.");
-    register!(ed, "backward-word", backward_word, "Move point backward one word.");
-    register!(ed, "beginning-of-buffer", beginning_of_buffer, "Move point to beginning of buffer.");
-    register!(ed, "end-of-buffer", end_of_buffer, "Move point to end of buffer.");
-    register!(ed, "scroll-up-command", scroll_up_command, "Scroll text upward one screenful.");
-    register!(ed, "scroll-down-command", scroll_down_command, "Scroll text downward one screenful.");
-    register!(ed, "recenter-top-bottom", recenter, "Center point in the window.");
+    register!(
+        ed,
+        "forward-char",
+        forward_char,
+        "Move point forward one character."
+    );
+    register!(
+        ed,
+        "backward-char",
+        backward_char,
+        "Move point backward one character."
+    );
+    register!(
+        ed,
+        "next-line",
+        next_line,
+        "Move point down one line, preserving column."
+    );
+    register!(
+        ed,
+        "previous-line",
+        previous_line,
+        "Move point up one line, preserving column."
+    );
+    register!(
+        ed,
+        "move-beginning-of-line",
+        move_beginning_of_line,
+        "Move point to beginning of line."
+    );
+    register!(
+        ed,
+        "move-end-of-line",
+        move_end_of_line,
+        "Move point to end of line."
+    );
+    register!(
+        ed,
+        "forward-word",
+        forward_word,
+        "Move point forward one word."
+    );
+    register!(
+        ed,
+        "backward-word",
+        backward_word,
+        "Move point backward one word."
+    );
+    register!(
+        ed,
+        "beginning-of-buffer",
+        beginning_of_buffer,
+        "Move point to beginning of buffer."
+    );
+    register!(
+        ed,
+        "end-of-buffer",
+        end_of_buffer,
+        "Move point to end of buffer."
+    );
+    register!(
+        ed,
+        "scroll-up-command",
+        scroll_up_command,
+        "Scroll text upward one screenful."
+    );
+    register!(
+        ed,
+        "scroll-down-command",
+        scroll_down_command,
+        "Scroll text downward one screenful."
+    );
+    register!(
+        ed,
+        "recenter-top-bottom",
+        recenter,
+        "Center point in the window."
+    );
     // editing
-    register!(ed, "self-insert-command", self_insert_command, "Insert the typed character.");
+    register!(
+        ed,
+        "self-insert-command",
+        self_insert_command,
+        "Insert the typed character."
+    );
     register!(ed, "newline", newline, "Insert a newline.");
-    register!(ed, "delete-char", delete_char, "Delete the character at point.");
-    register!(ed, "backward-delete-char", backward_delete_char, "Delete the character before point.");
-    register!(ed, "kill-line", kill_line, "Kill the rest of the current line.");
+    register!(
+        ed,
+        "delete-char",
+        delete_char,
+        "Delete the character at point."
+    );
+    register!(
+        ed,
+        "backward-delete-char",
+        backward_delete_char,
+        "Delete the character before point."
+    );
+    register!(
+        ed,
+        "kill-line",
+        kill_line,
+        "Kill the rest of the current line."
+    );
     register!(ed, "kill-word", kill_word, "Kill the word after point.");
-    register!(ed, "backward-kill-word", backward_kill_word, "Kill the word before point.");
-    register!(ed, "kill-region", kill_region, "Kill the text between point and mark.");
-    register!(ed, "kill-ring-save", kill_ring_save, "Copy the region to the kill ring.");
+    register!(
+        ed,
+        "backward-kill-word",
+        backward_kill_word,
+        "Kill the word before point."
+    );
+    register!(
+        ed,
+        "kill-region",
+        kill_region,
+        "Kill the text between point and mark."
+    );
+    register!(
+        ed,
+        "kill-ring-save",
+        kill_ring_save,
+        "Copy the region to the kill ring."
+    );
     register!(ed, "yank", yank, "Insert the most recent kill.");
-    register!(ed, "yank-pop", yank_pop, "Replace yanked text with a previous kill.");
+    register!(
+        ed,
+        "yank-pop",
+        yank_pop,
+        "Replace yanked text with a previous kill."
+    );
     register!(ed, "undo", undo, "Undo the last change.");
-    register!(ed, "set-mark-command", set_mark_command, "Set the mark where point is.");
-    register!(ed, "exchange-point-and-mark", exchange_point_and_mark, "Swap point and mark.");
-    register!(ed, "keyboard-quit", keyboard_quit, "Abort the current operation.");
-    register!(ed, "universal-argument", universal_argument, "Begin a numeric argument (4x).");
-    register!(ed, "negative-argument", negative_argument, "Begin a negative numeric argument.");
+    register!(
+        ed,
+        "set-mark-command",
+        set_mark_command,
+        "Set the mark where point is."
+    );
+    register!(
+        ed,
+        "exchange-point-and-mark",
+        exchange_point_and_mark,
+        "Swap point and mark."
+    );
+    register!(
+        ed,
+        "keyboard-quit",
+        keyboard_quit,
+        "Abort the current operation."
+    );
+    register!(
+        ed,
+        "universal-argument",
+        universal_argument,
+        "Begin a numeric argument (4x)."
+    );
+    register!(
+        ed,
+        "negative-argument",
+        negative_argument,
+        "Begin a negative numeric argument."
+    );
     // files
     register!(ed, "find-file", find_file, "Open a file.");
-    register!(ed, "save-buffer", save_buffer, "Save the current buffer to its file.");
-    register!(ed, "write-file", write_file, "Save the current buffer to a new file.");
-    register!(ed, "switch-to-buffer", switch_to_buffer, "Switch to another buffer.");
+    register!(
+        ed,
+        "save-buffer",
+        save_buffer,
+        "Save the current buffer to its file."
+    );
+    register!(
+        ed,
+        "write-file",
+        write_file,
+        "Save the current buffer to a new file."
+    );
+    register!(
+        ed,
+        "switch-to-buffer",
+        switch_to_buffer,
+        "Switch to another buffer."
+    );
     register!(ed, "kill-buffer", kill_buffer, "Kill a buffer.");
-    register!(ed, "save-buffers-kill-terminal", save_buffers_kill_terminal, "Save buffers and exit.");
+    register!(
+        ed,
+        "save-buffers-kill-terminal",
+        save_buffers_kill_terminal,
+        "Save buffers and exit."
+    );
     // misc
-    register!(ed, "execute-extended-command", execute_extended_command, "Run a command by name.");
-    register!(ed, "describe-key", describe_key, "Show what a key sequence runs.");
-    register!(ed, "describe-bindings", describe_bindings, "List all key bindings.");
+    register!(
+        ed,
+        "execute-extended-command",
+        execute_extended_command,
+        "Run a command by name."
+    );
+    register!(
+        ed,
+        "describe-key",
+        describe_key,
+        "Show what a key sequence runs."
+    );
+    register!(
+        ed,
+        "describe-bindings",
+        describe_bindings,
+        "List all key bindings."
+    );
 
     // digit arguments: C-1..C-9, M-1..M-9
     digit_cmd!(ed, 1, digit_1);
@@ -661,19 +850,23 @@ impl Editor {
         self.set_current(idx);
         if self.buf().path().is_none() {
             let idx = self.current_idx();
-            self.read_string("File to save in: ", None, Box::new(move |ed, name| {
-                if name.is_empty() {
-                    return Ok(());
-                }
-                let path = PathBuf::from(&name);
-                let file_name = path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| name.clone());
-                ed.buffers_mut()[idx].set_path(Some(path));
-                ed.buffers_mut()[idx].set_name(file_name);
-                ed.save_buffer_now(idx)
-            }));
+            self.read_string(
+                "File to save in: ",
+                None,
+                Box::new(move |ed, name| {
+                    if name.is_empty() {
+                        return Ok(());
+                    }
+                    let path = PathBuf::from(&name);
+                    let file_name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| name.clone());
+                    ed.buffers_mut()[idx].set_path(Some(path));
+                    ed.buffers_mut()[idx].set_name(file_name);
+                    ed.save_buffer_now(idx)
+                }),
+            );
             Ok(())
         } else {
             self.save_buffer_now(idx)

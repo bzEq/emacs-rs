@@ -24,7 +24,11 @@ fn visible_content(s: ropey::RopeSlice<'_>) -> ropey::RopeSlice<'_> {
 fn visual_col(s: ropey::RopeSlice<'_>) -> usize {
     let mut col = 0usize;
     for c in s.chars() {
-        col += if c == '\t' { TAB_WIDTH - col % TAB_WIDTH } else { 1 };
+        col += if c == '\t' {
+            TAB_WIDTH - col % TAB_WIDTH
+        } else {
+            1
+        };
     }
     col
 }
@@ -82,7 +86,11 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         Style::default().fg(Color::Black).bg(Color::White)
     };
     let echo_text: String = if let Some(mb) = ed.minibuffer() {
-        let caret = if mb.cursor == mb.input.chars().count() { "█" } else { "" };
+        let caret = if mb.cursor == mb.input.chars().count() {
+            "█"
+        } else {
+            ""
+        };
         format!("{}{}{}", mb.prompt, mb.input, caret)
     } else if let Some(emacs_core::minibuffer::Pending::YesNo { prompt, .. }) = ed.pending() {
         prompt.clone()
@@ -92,7 +100,10 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         status_line(ed)
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(echo_text, echo_style.add_modifier(Modifier::BOLD))),
+        Paragraph::new(Span::styled(
+            echo_text,
+            echo_style.add_modifier(Modifier::BOLD),
+        )),
         echo_rect,
     );
 

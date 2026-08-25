@@ -138,7 +138,10 @@ impl LuaHost {
         emacs.set(
             "buffer_path",
             lua.create_function(|lua, ()| {
-                Ok(editor_ref(lua)?.buf().path().map(|p| p.display().to_string()))
+                Ok(editor_ref(lua)?
+                    .buf()
+                    .path()
+                    .map(|p| p.display().to_string()))
             })?,
         )?;
 

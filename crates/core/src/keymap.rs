@@ -114,9 +114,18 @@ mod tests {
         km.bind(Key::ctrl('a'), "beginning-of-line");
 
         assert_eq!(km.lookup(&parse_sequence("C-x").unwrap()), Lookup::Prefix);
-        assert_eq!(km.lookup(&parse_sequence("C-x C-f").unwrap()), Lookup::Command("find-file"));
-        assert_eq!(km.lookup(&parse_sequence("C-x z").unwrap()), Lookup::Unbound);
-        assert_eq!(km.lookup(&parse_sequence("C-a").unwrap()), Lookup::Command("beginning-of-line"));
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x C-f").unwrap()),
+            Lookup::Command("find-file")
+        );
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x z").unwrap()),
+            Lookup::Unbound
+        );
+        assert_eq!(
+            km.lookup(&parse_sequence("C-a").unwrap()),
+            Lookup::Command("beginning-of-line")
+        );
         assert_eq!(km.lookup(&parse_sequence("C-b").unwrap()), Lookup::Unbound);
     }
 

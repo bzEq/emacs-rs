@@ -4,9 +4,15 @@
 pub enum UndoEntry {
     Boundary,
     /// `text` was inserted at `pos` with char length `len`; undo removes it.
-    Insert { pos: usize, len: usize },
+    Insert {
+        pos: usize,
+        len: usize,
+    },
     /// `text` was deleted at `pos`; undo re-inserts it.
-    Delete { pos: usize, text: String },
+    Delete {
+        pos: usize,
+        text: String,
+    },
 }
 
 #[derive(Debug, Default)]

@@ -148,9 +148,7 @@ impl Editor {
 
     /// Find a buffer by file path.
     pub fn find_buffer_by_path(&self, path: &Path) -> Option<usize> {
-        self.buffers
-            .iter()
-            .position(|b| b.path() == Some(path))
+        self.buffers.iter().position(|b| b.path() == Some(path))
     }
 
     pub fn add_buffer(&mut self, buf: Buffer) -> usize {
@@ -170,9 +168,7 @@ impl Editor {
     // --- views -------------------------------------------------------------
 
     pub fn view(&self) -> &View {
-        self.views
-            .get(&self.buf().id)
-            .unwrap_or(&View::DEFAULT)
+        self.views.get(&self.buf().id).unwrap_or(&View::DEFAULT)
     }
 
     pub fn view_mut(&mut self) -> &mut View {
@@ -493,22 +489,46 @@ mod tests {
     fn prefix_arg_values() {
         assert_eq!(PrefixArg::default().value(), 1);
         assert_eq!(
-            PrefixArg { universal: 1, ..Default::default() }.value(),
+            PrefixArg {
+                universal: 1,
+                ..Default::default()
+            }
+            .value(),
             4
         );
         assert_eq!(
-            PrefixArg { universal: 2, ..Default::default() }.value(),
+            PrefixArg {
+                universal: 2,
+                ..Default::default()
+            }
+            .value(),
             16
         );
         assert_eq!(
-            PrefixArg { digits: Some(12), ..Default::default() }.value(),
+            PrefixArg {
+                digits: Some(12),
+                ..Default::default()
+            }
+            .value(),
             12
         );
         assert_eq!(
-            PrefixArg { digits: Some(3), negative: true, ..Default::default() }.value(),
+            PrefixArg {
+                digits: Some(3),
+                negative: true,
+                ..Default::default()
+            }
+            .value(),
             -3
         );
-        assert_eq!(PrefixArg { negative: true, ..Default::default() }.value(), -1);
+        assert_eq!(
+            PrefixArg {
+                negative: true,
+                ..Default::default()
+            }
+            .value(),
+            -1
+        );
     }
 
     #[test]
