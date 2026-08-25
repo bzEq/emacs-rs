@@ -385,6 +385,10 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
         }
         Tab => {
             let had_preview = ed.minibuffer().is_some_and(|mb| !mb.preview.is_empty());
+            let prev_cands = ed
+                .minibuffer()
+                .map(|mb| mb.candidates.clone())
+                .unwrap_or_default();
             if let Some(mb) = ed.minibuffer_mut() {
                 mb.accept_preview();
             }
@@ -392,6 +396,17 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             if !had_preview {
                 // nothing to accept: cycle through candidates instead
                 if let Some(mb) = ed.minibuffer_mut() {
+                    // after cycling to a full name the candidate set
+                    // collapses to that one entry; keep cycling over the
+                    // previous set instead
+                    if mb.candidates.len() < 2 && prev_cands.len() >= 2 {
+                        mb.candidates = prev_cands;
+                        let pos = mb.candidates.iter().position(|c| *c == mb.input);
+                        mb.cycle = match pos {
+                            Some(i) => i, // cycle() advances to the next
+                            None => usize::MAX,
+                        };
+                    }
                     mb.cycle();
                 }
             }

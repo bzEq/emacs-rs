@@ -451,11 +451,70 @@ fn negative_argument(ed: &mut Editor) -> Result<()> {
 
 // --- files / buffers -------------------------------------------------------
 
+/// Expand a leading `~/` in a path.
+fn expand_tilde(input: &str) -> String {
+    if let Some(rest) = input.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = std::path::Path::new(&home);
+            return format!("{}/{}", home.display(), rest);
+        }
+    }
+    input.to_string()
+}
+
+/// Completion over file names (for C-x C-f): lists the directory part of
+/// the input and returns matching entries as full paths. Directories sort
+/// first and get a trailing `/`; dotfiles are hidden unless the prefix
+/// starts with `.`.
+pub fn complete_file_names(_ed: &Editor, input: &str) -> Vec<String> {
+    let expanded = expand_tilde(input);
+    let (dir, name_prefix) = match expanded.rfind('/') {
+        Some(i) => (&expanded[..i + 1], &expanded[i + 1..]),
+        None => (".", expanded.as_str()),
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, bool)> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            (name, is_dir)
+        })
+        .filter(|(name, _)| {
+            name.starts_with(name_prefix)
+                && (name_prefix.starts_with('.') || !name.starts_with('.'))
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        b.1.cmp(&a.1) // directories first
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+    entries
+        .into_iter()
+        .map(|(name, is_dir)| {
+            let mut full = if dir == "." {
+                String::new()
+            } else if dir.ends_with('/') {
+                dir.to_string()
+            } else {
+                format!("{dir}/")
+            };
+            full.push_str(&name);
+            if is_dir {
+                full.push('/');
+            }
+            full
+        })
+        .collect()
+}
+
 fn find_file(ed: &mut Editor) -> Result<()> {
     let cur = ed.selected_buffer_index();
     ed.read_string(
         "Find file: ",
-        None,
+        Some(complete_file_names),
         Box::new(move |ed, name| {
             if name.is_empty() {
                 return Ok(());
@@ -1261,5 +1320,44 @@ mod tests {
         ed.invoke_command("digit-argument-9").unwrap(); // 99
         ed.invoke_command("goto-line").unwrap();
         assert_eq!(ed.buf().line_of_point(), ed.buf().len_lines() - 1);
+    }
+
+    #[test]
+    fn file_completion_lists_dir_entries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let t = std::env::temp_dir().join(format!("em-filecomp-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(t.join("sub")).unwrap();
+        std::fs::write(t.join("alpha.txt"), "a").unwrap();
+        std::fs::write(t.join("beta.txt"), "b").unwrap();
+        std::fs::write(t.join(".hidden"), "h").unwrap();
+        let ed = Editor::new(20, 80);
+        let base = t.display().to_string();
+        assert_eq!(
+            complete_file_names(&ed, &format!("{base}/a")),
+            vec![format!("{base}/alpha.txt")]
+        );
+        assert_eq!(
+            complete_file_names(&ed, &format!("{base}/b")),
+            vec![format!("{base}/beta.txt")]
+        );
+        // empty prefix: all entries, directories first, dotfiles hidden
+        assert_eq!(
+            complete_file_names(&ed, &format!("{base}/")),
+            vec![
+                format!("{base}/sub/"),
+                format!("{base}/alpha.txt"),
+                format!("{base}/beta.txt"),
+            ]
+        );
+        // dotfiles appear once the prefix starts with '.'
+        assert_eq!(
+            complete_file_names(&ed, &format!("{base}/.")),
+            vec![format!("{base}/.hidden")]
+        );
+        // non-existent directory: no candidates
+        assert!(complete_file_names(&ed, &format!("{base}/nope/x")).is_empty());
+        let _ = std::fs::remove_dir_all(&t);
     }
 }
