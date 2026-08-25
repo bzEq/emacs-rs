@@ -1,6 +1,7 @@
 //! tree-sitter based syntax highlighting: parse a buffer, classify node
 //! kinds into highlight groups, and extract per-line styled segments.
 
+use ropey::Rope;
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::buffer::Buffer;
@@ -38,6 +39,50 @@ pub fn parse(lang: Lang, text: &str) -> Option<Syntax> {
     parser.set_language(&language).ok()?;
     let tree = parser.parse(text, None)?;
     Some(Syntax { lang, tree })
+}
+
+/// Whether a node kind is a comment or a string, per language.
+pub fn kind_is_comment_or_string(lang: Lang, kind: &str) -> bool {
+    match lang {
+        Lang::Rust => matches!(
+            kind,
+            "line_comment"
+                | "block_comment"
+                | "string_literal"
+                | "char_literal"
+                | "raw_string_literal"
+        ),
+        Lang::Lua => matches!(kind, "comment" | "string"),
+    }
+}
+
+/// Whether the given char offset lies inside a comment or string node
+/// (Emacs `syntax-ppss` equivalent, used by
+/// electric-newline-and-maybe-indent).
+pub fn point_in_comment_or_string(syntax: &Syntax, rope: &Rope, char_idx: usize) -> bool {
+    let len = rope.len_chars();
+    if len == 0 {
+        return false;
+    }
+    let byte = rope.char_to_byte(char_idx.min(len));
+    let mut node = syntax.tree.root_node();
+    loop {
+        if kind_is_comment_or_string(syntax.lang, node.kind()) {
+            return true;
+        }
+        let mut next = None;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.start_byte() <= byte && byte < child.end_byte() {
+                next = Some(child);
+                break;
+            }
+        }
+        match next {
+            Some(c) => node = c,
+            None => return false,
+        }
+    }
 }
 
 /// Highlight group for a node kind, per language.

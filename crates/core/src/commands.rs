@@ -155,6 +155,12 @@ fn newline_and_indent(ed: &mut Editor) -> Result<()> {
     Ok(())
 }
 
+/// C-j: newline, indented unless point is inside a comment or string.
+fn electric_newline_and_maybe_indent(ed: &mut Editor) -> Result<()> {
+    crate::indent::electric_newline_and_maybe_indent(ed);
+    Ok(())
+}
+
 /// TAB: re-indent the current line in programming modes, insert a tab
 /// otherwise.
 fn indent_for_tab_command(ed: &mut Editor) -> Result<()> {
@@ -769,6 +775,12 @@ pub fn register_defaults(ed: &mut Editor) {
     );
     register!(
         ed,
+        "electric-newline-and-maybe-indent",
+        electric_newline_and_maybe_indent,
+        "Insert a newline and indent the new line, unless point is in a comment or string."
+    );
+    register!(
+        ed,
         "indent-for-tab-command",
         indent_for_tab_command,
         "Indent the current line, or insert a tab."
@@ -985,6 +997,7 @@ pub fn register_defaults(ed: &mut Editor) {
     b(km, "C-l", "recenter-top-bottom");
     // editing
     b(km, "RET", "newline-and-indent");
+    b(km, "C-j", "electric-newline-and-maybe-indent");
     b(km, "TAB", "indent-for-tab-command");
     b(km, "C-d", "delete-char");
     b(km, "<delete>", "delete-char");

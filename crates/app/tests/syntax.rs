@@ -85,3 +85,37 @@ fn mx_rust_mode_switches_mode() {
     assert!(em.wait_for("(rust-mode)", 3000), "M-x rust-mode switches");
     em.quit();
 }
+
+#[test]
+fn cj_indents_normally() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.rs", "fn main() {");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("fn main() {", 5000));
+    em.keys(b"\x1b>"); // M->
+    em.keys(b"\x0a"); // C-j
+    assert!(em.wait_for("L2 C4", 3000), "C-j indents the new line");
+    em.quit();
+}
+
+#[test]
+fn cj_skips_indent_inside_string() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.rs", "fn main() {\n    let s = \"text\";\n}");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("text", 5000));
+    // C-n to the string line, C-e to EOL, back into the string
+    em.keys(b"\x0e\x05");
+    for _ in 0..3 {
+        em.keys(b"\x02"); // C-b
+    }
+    assert!(em.wait_for("L2 C16", 3000), "point inside the string");
+    em.keys(b"\x0a"); // C-j
+    assert!(
+        em.wait_for("L3 C0", 3000),
+        "C-j inside a string does not indent"
+    );
+    em.quit();
+}

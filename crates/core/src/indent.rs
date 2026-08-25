@@ -148,6 +148,28 @@ pub fn newline_and_indent(ed: &mut Editor) {
     ed.buf_mut().insert(&" ".repeat(target));
 }
 
+/// `electric-newline-and-maybe-indent` (C-j): insert a newline, and indent
+/// the new line only if point (before the newline) is not inside a comment
+/// or a string.
+pub fn electric_newline_and_maybe_indent(ed: &mut Editor) {
+    let before = ed.buf().point();
+    let indent_unit = ed.buf().mode().indent_unit;
+    let in_str_or_comment = ed.buf().syntax().map_or(false, |s| {
+        crate::syntax::point_in_comment_or_string(s, ed.buf().rope(), before)
+    });
+    ed.buf_mut().insert("\n");
+    let Some(unit) = indent_unit else {
+        return;
+    };
+    if in_str_or_comment {
+        return;
+    }
+    let buf = ed.buf_mut();
+    let line = buf.line_of_point();
+    let target = compute_indent(buf, line, unit);
+    ed.buf_mut().insert(&" ".repeat(target));
+}
+
 /// Delete one indent unit at line start, if point is inside the indentation.
 /// Returns true if an indent unit was removed.
 pub fn backward_delete_indent(ed: &mut Editor) -> bool {
@@ -239,5 +261,46 @@ mod tests {
             ed.buf().rope().to_string(),
             "function f()\n    print()\nend\n"
         );
+    }
+
+    #[test]
+    fn electric_newline_indents_normally() {
+        let mut ed = Editor::new(20, 80);
+        ed.buf_mut().set_mode(rust());
+        ed.buf_mut().insert("fn main() {");
+        ed.refresh_syntax_current();
+        ed.buf_mut().move_to_buffer_end();
+        electric_newline_and_maybe_indent(&mut ed);
+        assert_eq!(ed.buf().rope().to_string(), "fn main() {\n    ");
+    }
+
+    #[test]
+    fn electric_newline_skips_indent_inside_string() {
+        let mut ed = Editor::new(20, 80);
+        ed.buf_mut().set_mode(rust());
+        ed.buf_mut().insert("fn main() {\n    let s = \"text\";\n}");
+        ed.refresh_syntax_current();
+        // point inside the string literal ("te|xt"): insert a newline there
+        let line1 = ed.buf().rope().line_to_char(1);
+        ed.buf_mut().set_point(line1 + 15); // 'x' of "text"
+        electric_newline_and_maybe_indent(&mut ed);
+        // the new line starts right at "xt\";" with no indentation
+        assert!(ed.buf().rope().to_string().contains("\nxt"));
+        assert!(!ed.buf().rope().to_string().contains("\n    xt"));
+    }
+
+    #[test]
+    fn electric_newline_skips_indent_inside_comment() {
+        let mut ed = Editor::new(20, 80);
+        ed.buf_mut().set_mode(rust());
+        ed.buf_mut().insert("fn main() {\n    // note\n}");
+        ed.refresh_syntax_current();
+        // point inside the comment text ("// no|te")
+        let line1 = ed.buf().rope().line_to_char(1);
+        ed.buf_mut().set_point(line1 + 9); // 't' of "note"
+        electric_newline_and_maybe_indent(&mut ed);
+        // the new line starts with "te\n}" content and no indent
+        assert!(ed.buf().rope().to_string().contains("\nte"));
+        assert!(!ed.buf().rope().to_string().contains("\n    te"));
     }
 }
