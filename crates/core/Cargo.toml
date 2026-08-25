@@ -8,5 +8,8 @@ license.workspace = true
 ropey.workspace = true
 anyhow.workspace = true
 bitflags.workspace = true
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-lua = "0.5"
 
 [dev-dependencies]

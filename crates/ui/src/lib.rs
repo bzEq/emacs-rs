@@ -1,6 +1,7 @@
 //! Terminal rendering: window tree, modeline, echo area / minibuffer, cursor.
 
 use emacs_core::editor::Editor;
+use emacs_core::syntax::{line_segments, Group};
 use emacs_core::view::View;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -54,15 +55,80 @@ fn render_window(frame: &mut Frame, buf: &emacs_core::buffer::Buffer, view: &Vie
     let lines: Vec<TuiLine> = (0..rect.height as usize)
         .filter_map(|i| {
             let line_idx = view.top_line + i;
-            (line_idx < buf.len_lines())
-                .then(|| TuiLine::from(expand_tabs(visible_content(buf.line(line_idx)))))
+            (line_idx < buf.len_lines()).then(|| render_line(buf, line_idx))
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
+fn style_for(group: Group) -> Style {
+    let color = match group {
+        Group::Keyword => Color::Magenta,
+        Group::String => Color::Green,
+        Group::Comment => Color::DarkGray,
+        Group::Number => Color::Yellow,
+        Group::Type => Color::Cyan,
+        Group::Function => Color::Blue,
+        Group::Constant => Color::Yellow,
+    };
+    Style::default().fg(color)
+}
+
+/// Slice by char columns.
+fn slice_cols(s: &str, a: usize, b: usize) -> &str {
+    let count = s.chars().count();
+    let a = a.min(count);
+    let b = b.min(count);
+    if b <= a {
+        return "";
+    }
+    let start = s.char_indices().nth(a).map(|(i, _)| i).unwrap_or(s.len());
+    let end = s.char_indices().nth(b).map(|(i, _)| i).unwrap_or(s.len());
+    &s[start..end]
+}
+
+/// One line with syntax highlighting. Lines containing tabs are rendered
+/// plain (tab expansion would shift highlight columns).
+fn render_line(buf: &emacs_core::buffer::Buffer, line_idx: usize) -> TuiLine<'static> {
+    let content = visible_content(buf.line(line_idx));
+    if content.len_chars() == 0 {
+        return TuiLine::from("");
+    }
+    let plain = expand_tabs(content);
+    let has_tab = content.chars().any(|c| c == '\t');
+    let segs = buf
+        .syntax()
+        .map(|s| line_segments(s, buf, line_idx))
+        .unwrap_or_default();
+    if has_tab || segs.is_empty() {
+        return TuiLine::from(plain);
+    }
+    let total = plain.chars().count();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut last = 0usize;
+    for s in segs {
+        let s_start = s.start.min(total);
+        let s_end = s.end.min(total);
+        if s_end <= s_start {
+            continue;
+        }
+        if s_start > last {
+            spans.push(Span::raw(slice_cols(&plain, last, s_start).to_string()));
+        }
+        spans.push(Span::styled(
+            slice_cols(&plain, s_start, s_end).to_string(),
+            style_for(s.group),
+        ));
+        last = s_end;
+    }
+    if last < total {
+        spans.push(Span::raw(slice_cols(&plain, last, total).to_string()));
+    }
+    TuiLine::from(spans)
+}
+
 /// Modeline for a buffer, Emacs-style: `--`/`**` + `%` for read-only, name,
-/// point position, line count.
+/// mode, point position, line count.
 fn modeline(buf: &emacs_core::buffer::Buffer) -> String {
     let modified = if buf.modified() { "**" } else { "--" };
     let ro = if buf.read_only() { "%" } else { "-" };
@@ -71,7 +137,8 @@ fn modeline(buf: &emacs_core::buffer::Buffer) -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| buf.name().to_string());
     format!(
-        "-{modified}{ro}-  {file}  L{} C{}  {} lines",
+        "-{modified}{ro}-  {file}  ({})  L{} C{}  {} lines",
+        buf.mode().name,
         buf.line_of_point() + 1,
         buf.column(),
         buf.len_lines()

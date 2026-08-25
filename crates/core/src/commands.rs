@@ -149,6 +149,23 @@ fn newline(ed: &mut Editor) -> Result<()> {
     Ok(())
 }
 
+/// RET in programming modes: newline + auto-indentation.
+fn newline_and_indent(ed: &mut Editor) -> Result<()> {
+    crate::indent::newline_and_indent(ed);
+    Ok(())
+}
+
+/// TAB: re-indent the current line in programming modes, insert a tab
+/// otherwise.
+fn indent_for_tab_command(ed: &mut Editor) -> Result<()> {
+    if ed.buf().mode().indent_unit.is_some() {
+        crate::indent::indent_line(ed);
+    } else {
+        ed.buf_mut().insert_char('\t');
+    }
+    Ok(())
+}
+
 fn delete_char(ed: &mut Editor) -> Result<()> {
     for _ in 0..n_repeat(ed, 1) {
         ed.buf_mut().delete_forward();
@@ -158,7 +175,9 @@ fn delete_char(ed: &mut Editor) -> Result<()> {
 
 fn backward_delete_char(ed: &mut Editor) -> Result<()> {
     for _ in 0..n_repeat(ed, 1) {
-        ed.buf_mut().delete_backward();
+        if !crate::indent::backward_delete_indent(ed) {
+            ed.buf_mut().delete_backward();
+        }
     }
     Ok(())
 }
@@ -692,6 +711,18 @@ pub fn register_defaults(ed: &mut Editor) {
     register!(ed, "newline", newline, "Insert a newline.");
     register!(
         ed,
+        "newline-and-indent",
+        newline_and_indent,
+        "Insert a newline and indent the new line."
+    );
+    register!(
+        ed,
+        "indent-for-tab-command",
+        indent_for_tab_command,
+        "Indent the current line, or insert a tab."
+    );
+    register!(
+        ed,
         "delete-char",
         delete_char,
         "Delete the character at point."
@@ -887,7 +918,8 @@ pub fn register_defaults(ed: &mut Editor) {
     b(km, "<prior>", "scroll-down-command");
     b(km, "C-l", "recenter-top-bottom");
     // editing
-    b(km, "RET", "newline");
+    b(km, "RET", "newline-and-indent");
+    b(km, "TAB", "indent-for-tab-command");
     b(km, "C-d", "delete-char");
     b(km, "<delete>", "delete-char");
     b(km, "DEL", "backward-delete-char");

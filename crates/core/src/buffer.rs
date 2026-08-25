@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ropey::Rope;
 
+use crate::mode::{mode_for_path, Mode, FUNDAMENTAL};
+use crate::syntax::Syntax;
 use crate::undo::UndoLog;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -49,6 +51,14 @@ pub struct Buffer {
     /// True when the buffer content should be treated as read-only
     /// (used for *Help*).
     read_only: bool,
+    /// Major mode (language + indent behavior).
+    mode: Mode,
+    /// Parsed syntax tree for highlighting, if the mode has a language.
+    syntax: Option<Syntax>,
+    /// Set by edits while a language mode is active; triggers re-parse.
+    syntax_dirty: bool,
+    /// Last re-parse time, for edit throttling.
+    syntax_last_parse: Option<std::time::Instant>,
 }
 
 impl Buffer {
@@ -64,16 +74,23 @@ impl Buffer {
             mark: None,
             undo: UndoLog::default(),
             read_only: false,
+            mode: FUNDAMENTAL,
+            syntax: None,
+            syntax_dirty: false,
+            syntax_last_parse: None,
         }
     }
 
     /// Build a buffer from any reader. Streaming, so peak memory stays flat
-    /// even for very large inputs.
+    /// even for very large inputs. The mode is picked from `name` (file
+    /// extension).
     pub fn from_reader(name: impl Into<String>, reader: impl Read) -> std::io::Result<Self> {
+        let name = name.into();
+        let mode = mode_for_path(&name);
         let rope = Rope::from_reader(BufReader::new(reader))?;
         Ok(Buffer {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            name: name.into(),
+            name,
             path: None,
             rope,
             point: 0,
@@ -82,6 +99,10 @@ impl Buffer {
             mark: None,
             undo: UndoLog::default(),
             read_only: false,
+            mode,
+            syntax: None,
+            syntax_dirty: mode.lang.is_some(),
+            syntax_last_parse: None,
         })
     }
 
@@ -180,6 +201,38 @@ impl Buffer {
 
     pub fn set_read_only(&mut self, ro: bool) {
         self.read_only = ro;
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+    }
+
+    pub fn syntax(&self) -> Option<&Syntax> {
+        self.syntax.as_ref()
+    }
+
+    pub fn set_syntax(&mut self, syntax: Option<Syntax>) {
+        self.syntax = syntax;
+    }
+
+    pub fn syntax_dirty(&self) -> bool {
+        self.syntax_dirty
+    }
+
+    pub fn set_syntax_dirty(&mut self, dirty: bool) {
+        self.syntax_dirty = dirty;
+    }
+
+    pub fn syntax_last_parse(&self) -> Option<std::time::Instant> {
+        self.syntax_last_parse
+    }
+
+    pub fn set_syntax_last_parse(&mut self, t: std::time::Instant) {
+        self.syntax_last_parse = Some(t);
     }
 
     /// 0-based line index containing `point`.
@@ -347,6 +400,7 @@ impl Buffer {
         self.point += len;
         self.goal_column = None;
         self.modified = true;
+        self.syntax_dirty |= self.mode.lang.is_some();
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -374,6 +428,7 @@ impl Buffer {
         }
         self.goal_column = None;
         self.modified = true;
+        self.syntax_dirty |= self.mode.lang.is_some();
         text
     }
 

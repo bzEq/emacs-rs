@@ -338,6 +338,42 @@ impl Editor {
         w.view.recenter(buf, rows);
     }
 
+    /// Re-parse the selected window's buffer for highlighting if it has a
+    /// language mode and is marked dirty (or has no tree yet). Files above
+    /// the parse caps are left alone, and re-parses are throttled, to keep
+    /// large-file editing snappy.
+    pub fn refresh_syntax_current(&mut self) {
+        const COOLDOWN: std::time::Duration = std::time::Duration::from_millis(200);
+        let idx = self.selected_buffer_index();
+        let buf = &mut self.buffers[idx];
+        let Some(lang) = buf.mode().lang else {
+            return;
+        };
+        let len = buf.rope().len_chars();
+        if len > crate::syntax::MAX_PARSE_CHARS {
+            return;
+        }
+        if buf.syntax().is_some() && len > crate::syntax::MAX_REPARSE_CHARS {
+            return; // keep the initial parse
+        }
+        if !buf.syntax_dirty() && buf.syntax().is_some() {
+            return;
+        }
+        if buf.syntax().is_some()
+            && buf
+                .syntax_last_parse()
+                .map_or(false, |t| t.elapsed() < COOLDOWN)
+        {
+            return; // dirty but throttled; re-parsed on a later key
+        }
+        let text = buf.rope().to_string();
+        if let Some(s) = crate::syntax::parse(lang, &text) {
+            buf.set_syntax(Some(s));
+            buf.set_syntax_dirty(false);
+            buf.set_syntax_last_parse(std::time::Instant::now());
+        }
+    }
+
     // --- keymap / commands -------------------------------------------------
 
     pub fn keymap(&self) -> &Keymap {

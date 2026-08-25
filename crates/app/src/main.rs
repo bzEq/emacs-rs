@@ -99,6 +99,7 @@ fn run(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
                     if let Err(e) = handle_key(ed, key) {
                         ed.error(e.to_string());
                     }
+                    ed.refresh_syntax_current();
                 }
             }
             Event::Resize(w, h) => {

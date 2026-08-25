@@ -1,0 +1,240 @@
+//! tree-sitter based syntax highlighting: parse a buffer, classify node
+//! kinds into highlight groups, and extract per-line styled segments.
+
+use tree_sitter::{Node, Parser, Tree};
+
+use crate::buffer::Buffer;
+use crate::mode::Lang;
+
+/// Buffers larger than this (in chars) are never parsed.
+pub const MAX_PARSE_CHARS: usize = 1_000_000;
+/// Buffers larger than this keep their initial parse and skip re-parsing
+/// on edits.
+pub const MAX_REPARSE_CHARS: usize = 100_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Keyword,
+    String,
+    Comment,
+    Number,
+    Type,
+    Function,
+    Constant,
+}
+
+#[derive(Debug)]
+pub struct Syntax {
+    pub lang: Lang,
+    pub tree: Tree,
+}
+
+pub fn parse(lang: Lang, text: &str) -> Option<Syntax> {
+    let mut parser = Parser::new();
+    let language = match lang {
+        Lang::Rust => tree_sitter::Language::new(tree_sitter_rust::LANGUAGE),
+        Lang::Lua => tree_sitter::Language::new(tree_sitter_lua::LANGUAGE),
+    };
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(text, None)?;
+    Some(Syntax { lang, tree })
+}
+
+/// Highlight group for a node kind, per language.
+pub fn group_for(lang: Lang, kind: &str) -> Option<Group> {
+    use Group::*;
+    match lang {
+        Lang::Rust => match kind {
+            "fn" | "let" | "if" | "else" | "match" | "impl" | "struct" | "enum" | "use" | "mod"
+            | "pub" | "return" | "for" | "while" | "loop" | "in" | "as" | "const" | "static"
+            | "mut" | "where" | "trait" | "async" | "await" | "crate" | "self" | "ref" | "move"
+            | "unsafe" | "type" | "dyn" | "continue" | "break" | "extern" => Some(Keyword),
+            "string_literal" | "char_literal" | "raw_string_literal" => Some(String),
+            "line_comment" | "block_comment" => Some(Comment),
+            "integer_literal" | "float_literal" => Some(Number),
+            "boolean_literal" => Some(Constant),
+            "type_identifier" | "primitive_type" => Some(Type),
+            _ => None,
+        },
+        Lang::Lua => match kind {
+            "return" | "local" | "if" | "then" | "else" | "elseif" | "end" | "for" | "while"
+            | "do" | "repeat" | "until" | "in" | "nil" | "true" | "false" | "not" | "and"
+            | "or" | "break" | "goto" | "function" => Some(Keyword),
+            "string" => Some(String),
+            "comment" => Some(Comment),
+            "number" => Some(Number),
+            _ => None,
+        },
+    }
+}
+
+/// A highlight segment, in char columns relative to the line start.
+#[derive(Debug, Clone, Copy)]
+pub struct Segment {
+    pub start: usize,
+    pub end: usize,
+    pub group: Group,
+}
+
+struct RawSeg {
+    start: usize,
+    end: usize,
+    group: Group,
+    depth: usize,
+}
+
+fn collect(
+    node: Node<'_>,
+    lang: Lang,
+    start_byte: usize,
+    end_byte: usize,
+    line_start_char: usize,
+    buf: &Buffer,
+    out: &mut Vec<RawSeg>,
+    depth: usize,
+) {
+    let nb = node.start_byte();
+    let ne = node.end_byte();
+    if nb >= end_byte || ne <= start_byte {
+        return;
+    }
+
+    let kind = node.kind();
+    let mut push_range = |s: usize, e: usize, g: Group| {
+        let s = s.clamp(nb, ne);
+        let e = e.clamp(nb, ne);
+        let sc = buf.rope().byte_to_char(s).saturating_sub(line_start_char);
+        let ec = buf.rope().byte_to_char(e).saturating_sub(line_start_char);
+        if ec > sc {
+            out.push(RawSeg {
+                start: sc,
+                end: ec,
+                group: g,
+                depth,
+            });
+        }
+    };
+
+    if let Some(g) = group_for(lang, kind) {
+        push_range(nb, ne, g);
+    }
+
+    // function names (Rust): color the name of fn items
+    if lang == Lang::Rust && (kind == "function_item" || kind == "function_signature_item") {
+        if let Some(name) = node.named_child(0) {
+            push_range(name.start_byte(), name.end_byte(), Group::Function);
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect(
+            child,
+            lang,
+            start_byte,
+            end_byte,
+            line_start_char,
+            buf,
+            out,
+            depth + 1,
+        );
+    }
+}
+
+/// Highlight segments for one line. Deeper (more specific) nodes win over
+/// their ancestors.
+pub fn line_segments(syntax: &Syntax, buf: &Buffer, line_idx: usize) -> Vec<Segment> {
+    let line_start_char = buf.rope().line_to_char(line_idx);
+    let line_end_char = line_start_char + buf.line_len_chars(line_idx);
+    if line_end_char <= line_start_char {
+        return Vec::new();
+    }
+    let start_byte = buf.rope().char_to_byte(line_start_char);
+    let end_byte = buf.rope().char_to_byte(line_end_char);
+
+    let mut raw = Vec::new();
+    collect(
+        syntax.tree.root_node(),
+        syntax.lang,
+        start_byte,
+        end_byte,
+        line_start_char,
+        buf,
+        &mut raw,
+        0,
+    );
+    // start asc, then innermost (deepest) first
+    raw.sort_by(|a, b| {
+        a.start
+            .cmp(&b.start)
+            .then(b.depth.cmp(&a.depth))
+            .then(b.end.cmp(&a.end))
+    });
+    // greedy fill: first segment covering a column wins
+    let mut filled: Vec<Segment> = Vec::new();
+    let mut last_end = 0usize;
+    for s in raw {
+        if s.start >= last_end {
+            filled.push(Segment {
+                start: s.start,
+                end: s.end,
+                group: s.group,
+            });
+            last_end = last_end.max(s.end);
+        }
+    }
+    filled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mode::mode_for_path;
+
+    fn buf_with(name: &str, text: &str) -> Buffer {
+        let mut b = Buffer::from_reader(name, text.as_bytes()).unwrap();
+        let lang = mode_for_path(name).lang.expect("lang");
+        let s = parse(lang, text).expect("parse");
+        b.set_syntax(Some(s));
+        b
+    }
+
+    #[test]
+    fn rust_keyword_and_comment() {
+        let b = buf_with("t.rs", "fn main() { // hi\n}\n");
+        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        assert!(segs.iter().any(|s| s.group == Group::Keyword));
+        assert!(segs.iter().any(|s| s.group == Group::Comment));
+        // "fn" at cols 0-2
+        let kw = segs.iter().find(|s| s.group == Group::Keyword).unwrap();
+        assert_eq!((kw.start, kw.end), (0, 2));
+    }
+
+    #[test]
+    fn rust_string() {
+        let b = buf_with("t.rs", r#"let x = "hello";"#);
+        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        let s = segs.iter().find(|s| s.group == Group::String).unwrap();
+        assert_eq!(&b.rope().to_string()[s.start..s.end], "\"hello\"");
+    }
+
+    #[test]
+    fn lua_keywords() {
+        let b = buf_with("t.lua", "local function f() return 42 end");
+        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        let kw = segs.iter().filter(|s| s.group == Group::Keyword).count();
+        assert!(kw >= 3, "local/function/return/end");
+        assert!(segs.iter().any(|s| s.group == Group::Number));
+    }
+
+    #[test]
+    fn function_name_colored() {
+        let b = buf_with("t.rs", "fn hello() {}\n");
+        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        assert!(
+            segs.iter()
+                .any(|s| s.group == Group::Function && s.start == 3 && s.end == 8),
+            "hello is 3..8"
+        );
+    }
+}
