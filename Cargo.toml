@@ -4,7 +4,7 @@ members = ["crates/core", "crates/ui", "crates/app", "crates/lua"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 ropey = "1"
