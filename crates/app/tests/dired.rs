@@ -35,6 +35,22 @@ fn find_file_on_directory_opens_dired() {
 }
 
 #[test]
+fn directory_argument_opens_dired() {
+    let em = Em::spawn();
+    let d = em.scratch.join("work");
+    std::fs::create_dir(&d).unwrap();
+    std::fs::write(d.join("alpha.txt"), "aaa").unwrap();
+    let d_s = d.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&d_s]);
+    assert!(
+        em.wait_for("alpha.txt", 5000),
+        "directory command-line argument shows dired"
+    );
+    assert!(em.wait_for("(dired-mode)", 3000), "dired-mode active");
+    em.quit();
+}
+
+#[test]
 fn listing_shows_entries() {
     let em = Em::spawn();
     let d = em.scratch.join("work");

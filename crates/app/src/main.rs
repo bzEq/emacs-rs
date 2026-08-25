@@ -98,13 +98,18 @@ fn main() -> Result<()> {
     }
 
     if let Some(path) = file_arg {
-        match emacs_core::buffer::Buffer::load_file(&path) {
-            Ok(buf) => {
-                let id = buf.id;
-                ed.add_buffer(buf);
-                ed.set_selected_buffer(id);
+        let p = std::path::PathBuf::from(&path);
+        if p.is_dir() {
+            let _ = emacs_core::dired::open_dir(&mut ed, &p, false);
+        } else {
+            match emacs_core::buffer::Buffer::load_file(&path) {
+                Ok(buf) => {
+                    let id = buf.id;
+                    ed.add_buffer(buf);
+                    ed.set_selected_buffer(id);
+                }
+                Err(e) => ed.error(format!("cannot open {path}: {e}")),
             }
-            Err(e) => ed.error(format!("cannot open {path}: {e}")),
         }
     }
 
