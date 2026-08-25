@@ -22,9 +22,46 @@ use emacs_ui::render;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+/// Parsed command-line options.
+struct CliArgs {
+    /// Path of the init file (`--init`); falls back to the XDG config.
+    init: Option<PathBuf>,
+    /// First positional argument: file to open.
+    file: Option<String>,
+}
+
+fn parse_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String> {
+    let mut cli = CliArgs {
+        init: None,
+        file: None,
+    };
+    let mut it = args;
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--init" => match it.next() {
+                Some(path) if !path.is_empty() => cli.init = Some(PathBuf::from(path)),
+                _ => return Err("--init requires a file path".into()),
+            },
+            a if a.starts_with("--") => return Err(format!("unknown option: {a}")),
+            _ => {
+                if cli.file.is_none() {
+                    cli.file = Some(arg);
+                }
+            }
+        }
+    }
+    Ok(cli)
+}
+
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let file_arg: Option<String> = args.next();
+    let cli = match parse_args(std::env::args().skip(1)) {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprintln!("em: {e}\nusage: em [--init <init.lua>] [FILE]");
+            std::process::exit(2);
+        }
+    };
+    let file_arg = cli.file;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -46,11 +83,14 @@ fn main() -> Result<()> {
     match LuaHost::new() {
         Ok(host) => {
             ed.attach_script(Box::new(host));
-            if let Some(init) = init_file() {
+            let init = cli.init.clone().or_else(init_file);
+            if let Some(init) = init {
                 if init.exists() {
                     if let Err(e) = ed.load_script(&init) {
-                        ed.error(format!("error loading init.lua: {e}"));
+                        ed.error(format!("error loading {}: {e}", init.display()));
                     }
+                } else if cli.init.is_some() {
+                    ed.error(format!("cannot open init file: {}", init.display()));
                 }
             }
         }
@@ -414,4 +454,43 @@ fn pending_key(ed: &mut Editor, key: Key) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(v: &[&str]) -> CliArgs {
+        parse_args(v.iter().map(|s| s.to_string())).unwrap()
+    }
+
+    #[test]
+    fn init_option() {
+        let cli = parse(&["--init", "/tmp/foo.lua", "file.rs"]);
+        assert_eq!(
+            cli.init.as_deref(),
+            Some(std::path::Path::new("/tmp/foo.lua"))
+        );
+        assert_eq!(cli.file.as_deref(), Some("file.rs"));
+    }
+
+    #[test]
+    fn file_only() {
+        let cli = parse(&["notes.txt"]);
+        assert_eq!(cli.init, None);
+        assert_eq!(cli.file.as_deref(), Some("notes.txt"));
+    }
+
+    #[test]
+    fn no_args() {
+        let cli = parse(&[]);
+        assert_eq!(cli.init, None);
+        assert_eq!(cli.file, None);
+    }
+
+    #[test]
+    fn init_missing_path_errors() {
+        assert!(parse_args(["--init".to_string()].into_iter()).is_err());
+        assert!(parse_args(["--nope".to_string()].into_iter()).is_err());
+    }
 }
