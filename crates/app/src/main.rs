@@ -286,6 +286,32 @@ fn dispatch(ed: &mut Editor, key: Key) -> Result<()> {
     Ok(())
 }
 
+/// Recompute completion candidates from the minibuffer input: fills the
+/// longest common prefix and refreshes the candidate list for display.
+fn update_completion(ed: &mut Editor) {
+    let Some(completer) = ed.minibuffer().and_then(|mb| mb.completion) else {
+        return;
+    };
+    let input = ed
+        .minibuffer()
+        .map(|mb| mb.input.clone())
+        .unwrap_or_default();
+    let candidates = completer(ed, &input);
+    if let Some(mb) = ed.minibuffer_mut() {
+        mb.complete_with(candidates);
+    }
+    // recompute against the (possibly extended) input so the displayed
+    // candidates always match what is in the minibuffer
+    let input = ed
+        .minibuffer()
+        .map(|mb| mb.input.clone())
+        .unwrap_or_default();
+    let candidates = completer(ed, &input);
+    if let Some(mb) = ed.minibuffer_mut() {
+        mb.candidates = candidates;
+    }
+}
+
 /// Keys while the minibuffer is reading input.
 fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
     use KeyCode::*;
@@ -320,12 +346,14 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
                 if let Some(mb) = ed.minibuffer_mut() {
                     mb.delete_forward();
                 }
+                update_completion(ed);
             }
             'k' => {
                 if let Some(mb) = ed.minibuffer_mut() {
                     mb.input.truncate(mb.cursor);
                     mb.candidates.clear();
                 }
+                update_completion(ed);
             }
             _ => {}
         },
@@ -333,6 +361,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             if let Some(mb) = ed.minibuffer_mut() {
                 mb.insert_char(c);
             }
+            update_completion(ed);
         }
         Enter => {
             let input = ed
@@ -342,25 +371,33 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             ed.finish_read_string(input)?;
         }
         Tab => {
-            let input = ed
+            let before = ed
                 .minibuffer()
                 .map(|mb| mb.input.clone())
                 .unwrap_or_default();
-            let completer = ed.minibuffer().and_then(|mb| mb.completion);
-            let candidates = completer.map(|f| f(ed, &input)).unwrap_or_default();
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.complete_with(candidates);
+            update_completion(ed);
+            let after = ed
+                .minibuffer()
+                .map(|mb| mb.input.clone())
+                .unwrap_or_default();
+            if after == before {
+                // common prefix already filled: cycle through candidates
+                if let Some(mb) = ed.minibuffer_mut() {
+                    mb.cycle();
+                }
             }
         }
         Backspace => {
             if let Some(mb) = ed.minibuffer_mut() {
                 mb.delete_backward();
             }
+            update_completion(ed);
         }
         Delete => {
             if let Some(mb) = ed.minibuffer_mut() {
                 mb.delete_forward();
             }
+            update_completion(ed);
         }
         Left => {
             if let Some(mb) = ed.minibuffer_mut() {

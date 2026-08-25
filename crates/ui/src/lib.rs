@@ -182,23 +182,35 @@ fn modeline(buf: &emacs_core::buffer::Buffer, ed: &Editor) -> String {
 }
 
 /// Render the editor: all windows, modeline, echo area (which doubles as the
-/// minibuffer). Returns the on-screen cursor position.
+/// minibuffer and grows to two lines while completion candidates are shown).
+/// Returns the on-screen cursor position.
 pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     let area = frame.area();
     if area.height == 0 {
         return None;
     }
 
-    let body_h = area.height.saturating_sub(2);
+    let completing = ed.minibuffer().map_or(false, |mb| {
+        mb.completion.is_some() && !mb.candidates.is_empty() && mb.candidates.len() >= 2
+    });
+    let echo_h: u16 = if completing { 2 } else { 1 };
+
+    let body_h = area.height.saturating_sub(1 + echo_h);
     let modeline_rect = Rect {
         y: area.y + body_h,
-        height: area.height - body_h - 1,
+        height: area.height - body_h - echo_h,
         ..area
     };
     let echo_rect = Rect {
-        y: area.y + area.height - 1,
-        height: 1,
+        y: area.y + area.height - echo_h,
+        height: echo_h,
         ..area
+    };
+    // the input line sits on the bottom row of the echo area
+    let minibuf_rect = Rect {
+        y: echo_rect.y + echo_h - 1,
+        height: 1,
+        ..echo_rect
     };
 
     // --- windows -----------------------------------------------------------
@@ -231,6 +243,24 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     } else {
         Style::default().fg(Color::Black).bg(Color::White)
     };
+    if completing {
+        // completion candidates on the top echo row
+        let candidates: String = ed
+            .minibuffer()
+            .map(|mb| mb.candidates.join("  "))
+            .unwrap_or_default();
+        let cand_rect = Rect {
+            height: 1,
+            ..echo_rect
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                candidates,
+                Style::default().fg(Color::DarkGray),
+            )),
+            cand_rect,
+        );
+    }
     let echo_text: String = if let Some(mb) = ed.minibuffer() {
         let caret = if mb.cursor == mb.input.chars().count() {
             "█"
@@ -242,24 +272,27 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         prompt.clone()
     } else if let Some(msg) = ed.echo() {
         msg.to_string()
-    } else if ed.isearch_active() {
-        String::new()
     } else {
         String::new()
+    };
+    let line_rect = if ed.minibuffer().is_some() && completing {
+        minibuf_rect
+    } else {
+        echo_rect
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
             echo_text,
             echo_style.add_modifier(Modifier::BOLD),
         )),
-        echo_rect,
+        line_rect,
     );
 
     // --- cursor ------------------------------------------------------------
     if let Some(mb) = ed.minibuffer() {
-        let x = (echo_rect.x as usize + mb.prompt.chars().count() + mb.cursor)
-            .min((echo_rect.x + echo_rect.width.saturating_sub(1)) as usize);
-        return Some((x as u16, echo_rect.y));
+        let x = (line_rect.x as usize + mb.prompt.chars().count() + mb.cursor)
+            .min((line_rect.x + line_rect.width.saturating_sub(1)) as usize);
+        return Some((x as u16, line_rect.y));
     }
 
     let selected = layouts.iter().find(|l| l.selected)?;

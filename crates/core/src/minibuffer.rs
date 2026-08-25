@@ -26,7 +26,7 @@ impl Minibuffer {
             cursor: 0,
             completion,
             candidates: Vec::new(),
-            cycle: 0,
+            cycle: usize::MAX,
         }
     }
 
@@ -75,8 +75,12 @@ impl Minibuffer {
     }
 
     /// Fill the longest common prefix of all candidates and remember the
-    /// candidates for display.
+    /// candidates for display. Resets the cycle position when the candidate
+    /// set changes.
     pub fn complete_with(&mut self, candidates: Vec<String>) {
+        if self.candidates != candidates {
+            self.cycle = usize::MAX;
+        }
         if candidates.is_empty() {
             self.candidates.clear();
             return;
@@ -90,6 +94,19 @@ impl Minibuffer {
             self.cursor = self.input.chars().count();
         }
         self.candidates = candidates;
+    }
+
+    /// Cycle the input through the candidates (TAB after the common prefix
+    /// is already filled). Returns false if there are fewer than two
+    /// candidates.
+    pub fn cycle(&mut self) -> bool {
+        if self.candidates.len() < 2 {
+            return false;
+        }
+        self.cycle = self.cycle.wrapping_add(1) % self.candidates.len();
+        self.input = self.candidates[self.cycle].clone();
+        self.cursor = self.input.chars().count();
+        true
     }
 }
 
@@ -159,5 +176,47 @@ mod tests {
         mb.delete_backward();
         assert_eq!(mb.input, "ab");
         assert_eq!(mb.cursor, 1);
+    }
+
+    #[test]
+    fn completion_fills_lcp_then_cycles() {
+        let mut mb = Minibuffer::new("M-x ".into(), None);
+        mb.insert_char('d');
+        mb.complete_with(vec!["delete-char".into(), "describe-key".into()]);
+        assert_eq!(mb.input, "de", "common prefix filled");
+        assert_eq!(mb.candidates.len(), 2);
+        // TAB again: cycle through candidates
+        assert!(mb.cycle());
+        assert_eq!(mb.input, "delete-char");
+        assert!(mb.cycle());
+        assert_eq!(mb.input, "describe-key");
+        assert!(mb.cycle());
+        assert_eq!(mb.input, "delete-char", "wraps around");
+    }
+
+    #[test]
+    fn single_candidate_fills_completely() {
+        let mut mb = Minibuffer::new("M-x ".into(), None);
+        mb.insert_char('l');
+        mb.insert_char('u');
+        mb.complete_with(vec!["lua-mode".into()]);
+        assert_eq!(mb.input, "lua-mode");
+        assert!(!mb.cycle(), "single candidate does not cycle");
+    }
+
+    #[test]
+    fn cycle_resets_when_candidates_change() {
+        let mut mb = Minibuffer::new("M-x ".into(), None);
+        mb.complete_with(vec!["a-command".into(), "b-command".into()]);
+        assert!(mb.cycle());
+        assert_eq!(mb.input, "a-command");
+        // new input -> new candidate set -> cycle restarts
+        mb.complete_with(vec![
+            "a-command".into(),
+            "b-command".into(),
+            "c-command".into(),
+        ]);
+        assert!(mb.cycle());
+        assert_eq!(mb.input, "a-command");
     }
 }
