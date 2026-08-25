@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ropey::Rope;
 
-use crate::mode::{mode_for_path, Mode, FUNDAMENTAL};
+use crate::keymap::Keymap;
+use crate::mode::{fundamental, mode_for_path, Mode};
 use crate::syntax::Syntax;
 use crate::undo::UndoLog;
 
@@ -53,6 +54,10 @@ pub struct Buffer {
     read_only: bool,
     /// Major mode (language + indent behavior).
     mode: Mode,
+    /// Local keymap installed by the major mode / buffer-local bindings.
+    local_keymap: Option<Keymap>,
+    /// Names of enabled minor modes, in enable order (last = most recent).
+    enabled_minor: Vec<String>,
     /// Parsed syntax tree for highlighting, if the mode has a language.
     syntax: Option<Syntax>,
     /// Set by edits while a language mode is active; triggers re-parse.
@@ -74,7 +79,9 @@ impl Buffer {
             mark: None,
             undo: UndoLog::default(),
             read_only: false,
-            mode: FUNDAMENTAL,
+            mode: fundamental(),
+            local_keymap: None,
+            enabled_minor: Vec::new(),
             syntax: None,
             syntax_dirty: false,
             syntax_last_parse: None,
@@ -87,6 +94,7 @@ impl Buffer {
     pub fn from_reader(name: impl Into<String>, reader: impl Read) -> std::io::Result<Self> {
         let name = name.into();
         let mode = mode_for_path(&name);
+        let has_lang = mode.lang.is_some();
         let rope = Rope::from_reader(BufReader::new(reader))?;
         Ok(Buffer {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
@@ -100,8 +108,10 @@ impl Buffer {
             undo: UndoLog::default(),
             read_only: false,
             mode,
+            local_keymap: None,
+            enabled_minor: Vec::new(),
             syntax: None,
-            syntax_dirty: mode.lang.is_some(),
+            syntax_dirty: has_lang,
             syntax_last_parse: None,
         })
     }
@@ -203,12 +213,42 @@ impl Buffer {
         self.read_only = ro;
     }
 
-    pub fn mode(&self) -> Mode {
-        self.mode
+    pub fn mode(&self) -> &Mode {
+        &self.mode
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    pub fn set_local_keymap(&mut self, keymap: Option<Keymap>) {
+        self.local_keymap = keymap;
+    }
+
+    pub fn local_keymap(&self) -> Option<&Keymap> {
+        self.local_keymap.as_ref()
+    }
+
+    pub fn local_keymap_mut(&mut self) -> &mut Keymap {
+        self.local_keymap.get_or_insert_with(Keymap::new)
+    }
+
+    pub fn enabled_minor(&self) -> &[String] {
+        &self.enabled_minor
+    }
+
+    pub fn minor_mode_enabled(&self, name: &str) -> bool {
+        self.enabled_minor.iter().any(|m| m == name)
+    }
+
+    pub fn enable_minor_mode(&mut self, name: &str) {
+        if !self.minor_mode_enabled(name) {
+            self.enabled_minor.push(name.to_string());
+        }
+    }
+
+    pub fn disable_minor_mode(&mut self, name: &str) {
+        self.enabled_minor.retain(|m| m != name);
     }
 
     pub fn syntax(&self) -> Option<&Syntax> {

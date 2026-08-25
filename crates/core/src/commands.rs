@@ -357,6 +357,38 @@ fn isearch_backward(ed: &mut Editor) -> Result<()> {
     Ok(())
 }
 
+// --- major / minor modes ----------------------------------------------------
+
+fn set_mode(ed: &mut Editor, name: &str) -> Result<()> {
+    let idx = ed.selected_buffer_index();
+    if let Err(e) = ed.set_buffer_mode_by_name(idx, name) {
+        ed.error(e.to_string());
+    }
+    Ok(())
+}
+
+fn fundamental_mode(ed: &mut Editor) -> Result<()> {
+    set_mode(ed, "fundamental-mode")
+}
+
+fn rust_mode(ed: &mut Editor) -> Result<()> {
+    set_mode(ed, "rust-mode")
+}
+
+fn lua_mode(ed: &mut Editor) -> Result<()> {
+    set_mode(ed, "lua-mode")
+}
+
+fn line_numbers_mode(ed: &mut Editor) -> Result<()> {
+    let idx = ed.selected_buffer_index();
+    match ed.toggle_minor_mode(idx, "line-numbers") {
+        Ok(true) => ed.message("Line numbers enabled"),
+        Ok(false) => ed.message("Line numbers disabled"),
+        Err(e) => ed.error(e.to_string()),
+    }
+    Ok(())
+}
+
 fn universal_argument(ed: &mut Editor) -> Result<()> {
     let mut arg = ed.prefix_arg();
     arg.universal += 1;
@@ -574,11 +606,27 @@ fn describe_key(ed: &mut Editor) -> Result<()> {
 }
 
 fn describe_bindings(ed: &mut Editor) -> Result<()> {
-    let flat = ed.keymap().flatten();
-    let mut text = String::from("Key bindings:\n\n");
-    for (seq, cmd) in &flat {
+    let mut text = String::from("Global key bindings:\n\n");
+    for (seq, cmd) in ed.keymap().flatten() {
         let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
         text.push_str(&format!("{}\t\t{}\n", seqs.join(" "), cmd));
+    }
+    let idx = ed.selected_buffer_index();
+    if let Some(local) = ed.buffers()[idx].local_keymap() {
+        text.push_str("\nLocal (mode) key bindings:\n\n");
+        for (seq, cmd) in local.flatten() {
+            let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
+            text.push_str(&format!("{}\t\t{}\n", seqs.join(" "), cmd));
+        }
+    }
+    for name in ed.buffers()[idx].enabled_minor().to_vec() {
+        if let Some(km) = ed.minor_def(&name).and_then(|d| d.keymap.as_ref()) {
+            text.push_str(&format!("\nMinor mode {name} key bindings:\n\n"));
+            for (seq, cmd) in km.flatten() {
+                let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
+                text.push_str(&format!("{}\t\t{}\n", seqs.join(" "), cmd));
+            }
+        }
     }
     let id = if let Some(idx) = ed.buffers().iter().position(|b| b.name() == "*Help*") {
         ed.buffers()[idx].id
@@ -832,6 +880,20 @@ pub fn register_defaults(ed: &mut Editor) {
         "isearch-backward",
         isearch_backward,
         "Incremental search backward."
+    );
+    register!(
+        ed,
+        "fundamental-mode",
+        fundamental_mode,
+        "Set the buffer to fundamental mode."
+    );
+    register!(ed, "rust-mode", rust_mode, "Set the buffer to rust mode.");
+    register!(ed, "lua-mode", lua_mode, "Set the buffer to lua mode.");
+    register!(
+        ed,
+        "line-numbers-mode",
+        line_numbers_mode,
+        "Toggle line numbers in the gutter."
     );
     // files
     register!(ed, "find-file", find_file, "Open a file.");

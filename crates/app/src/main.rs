@@ -219,8 +219,8 @@ fn dispatch(ed: &mut Editor, key: Key) -> Result<()> {
     ed.clear_echo();
     ed.push_key(key);
     let seq = ed.pending_keys().to_vec();
-    let name = match ed.keymap().lookup(&seq) {
-        Lookup::Command(name) => Some(name.to_string()),
+    let name = match ed.lookup_key(&seq) {
+        Lookup::Command(name) => Some(name),
         Lookup::Prefix => return Ok(()),
         Lookup::Unbound => {
             if ed.pending_keys().len() == 1 && key.is_self_insertable() {
@@ -355,9 +355,8 @@ fn pending_key(ed: &mut Editor, key: Key) -> Result<()> {
         if let Some(Pending::ReadKey { keys }) = ed.pending_mut() {
             keys.push(key);
             let seq = keys.clone();
-            match ed.keymap().lookup(&seq) {
+            match ed.lookup_key(&seq) {
                 Lookup::Command(name) => {
-                    let name = name.to_string();
                     let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
                     let doc = ed.commands().get(&name).map(|c| c.doc).unwrap_or("");
                     let doc = if doc.is_empty() {

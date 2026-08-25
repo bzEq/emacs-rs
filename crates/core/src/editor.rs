@@ -10,12 +10,25 @@ use crate::buffer::Buffer;
 use crate::command::CommandRegistry;
 use crate::isearch::ISearch;
 use crate::key::Key;
-use crate::keymap::Keymap;
+use crate::keymap::{Keymap, Lookup};
 use crate::kill_ring::KillRing;
 use crate::minibuffer::{BoolContinuation, CompletionFn, Minibuffer, Pending, StringContinuation};
+use crate::minor::MinorModeDef;
+use crate::mode::ModeDef;
 use crate::script::{NullHost, ScriptHost};
 use crate::view::View;
 use crate::window::{Rect as WinRect, Split, WindowTree};
+
+/// Which keymap resolved the key sequence in progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeymapSource {
+    Global,
+    /// The buffer's local (major mode) keymap.
+    Local,
+    /// An enabled minor mode keymap; index into the buffer's enabled list,
+    /// 0 = most recently enabled.
+    Minor(usize),
+}
 
 /// Numeric prefix argument state (C-u, C-3, M--, ...).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -84,12 +97,29 @@ pub struct Editor {
     /// Active incremental search state.
     isearch: Option<ISearch>,
     script: Option<Box<dyn ScriptHost>>,
+    /// Major mode definitions by name (built-in + Lua).
+    mode_defs: std::collections::HashMap<String, ModeDef>,
+    /// Minor mode definitions by name (built-in + Lua).
+    minor_defs: std::collections::HashMap<String, MinorModeDef>,
+    /// Which keymap the key sequence in progress belongs to.
+    pending_keymap: Option<KeymapSource>,
 }
 
 impl Editor {
     pub fn new(window_rows: usize, window_cols: usize) -> Self {
         let scratch = Buffer::new("*scratch*");
         let scratch_id = scratch.id;
+        let mut mode_defs = std::collections::HashMap::new();
+        for def in [
+            crate::mode::fundamental_def(),
+            crate::mode::rust_def(),
+            crate::mode::lua_def(),
+        ] {
+            mode_defs.insert(def.name.clone(), def);
+        }
+        let mut minor_defs = std::collections::HashMap::new();
+        let ln = crate::minor::line_numbers_def();
+        minor_defs.insert(ln.name.clone(), ln);
         let mut ed = Editor {
             buffers: vec![scratch],
             windows: WindowTree::new(scratch_id),
@@ -112,6 +142,9 @@ impl Editor {
             window_cols,
             isearch: None,
             script: None,
+            mode_defs,
+            minor_defs,
+            pending_keymap: None,
         };
         crate::commands::register_defaults(&mut ed);
         ed
@@ -384,6 +417,72 @@ impl Editor {
         &mut self.keymap
     }
 
+    /// Look up a key sequence against the active keymaps: enabled minor mode
+    /// keymaps (most recently enabled first), the buffer's local keymap,
+    /// then the global keymap. A prefix result fixes the source for the
+    /// rest of the sequence.
+    pub fn lookup_key(&mut self, seq: &[Key]) -> Lookup {
+        if seq.is_empty() {
+            return Lookup::Unbound;
+        }
+        if let Some(src) = self.pending_keymap {
+            let map = self.keymap_for_source(src);
+            return map.lookup(seq);
+        }
+        let idx = self.selected_buffer_index();
+        let minor_sources: Vec<KeymapSource> = self.buffers[idx]
+            .enabled_minor()
+            .iter()
+            .rev()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                self.minor_defs
+                    .get(name)
+                    .and_then(|d| d.keymap.as_ref())
+                    .map(|_| KeymapSource::Minor(i))
+            })
+            .collect();
+        let mut sources: Vec<KeymapSource> = minor_sources;
+        if self.buffers[idx].local_keymap().is_some() {
+            sources.push(KeymapSource::Local);
+        }
+        sources.push(KeymapSource::Global);
+        for src in sources {
+            let map = self.keymap_for_source(src);
+            match map.lookup(seq) {
+                Lookup::Unbound => continue,
+                Lookup::Prefix => {
+                    self.pending_keymap = Some(src);
+                    return Lookup::Prefix;
+                }
+                cmd => return cmd,
+            }
+        }
+        Lookup::Unbound
+    }
+
+    fn keymap_for_source(&self, src: KeymapSource) -> &Keymap {
+        match src {
+            KeymapSource::Global => &self.keymap,
+            KeymapSource::Local => self.buffers[self.selected_buffer_index()]
+                .local_keymap()
+                .expect("local keymap exists"),
+            KeymapSource::Minor(i) => {
+                let idx = self.selected_buffer_index();
+                let name = self.buffers[idx]
+                    .enabled_minor()
+                    .iter()
+                    .rev()
+                    .nth(i)
+                    .expect("minor mode exists");
+                self.minor_defs[name]
+                    .keymap
+                    .as_ref()
+                    .expect("minor keymap exists")
+            }
+        }
+    }
+
     pub fn commands(&self) -> &CommandRegistry {
         &self.commands
     }
@@ -435,6 +534,7 @@ impl Editor {
     pub fn clear_pending_keys(&mut self) {
         self.pending_keys.clear();
         self.esc_prefix = false;
+        self.pending_keymap = None;
     }
 
     pub fn esc_prefix(&self) -> bool {
@@ -655,6 +755,95 @@ impl Editor {
     pub fn current_buf_path(&self) -> Option<PathBuf> {
         self.buf().path().map(|p| p.to_path_buf())
     }
+
+    // --- major / minor modes ----------------------------------------------
+
+    pub fn register_mode_def(&mut self, def: ModeDef) {
+        self.mode_defs.insert(def.name.clone(), def);
+    }
+
+    pub fn mode_def(&self, name: &str) -> Option<&ModeDef> {
+        self.mode_defs.get(name)
+    }
+
+    pub fn mode_defs(&self) -> impl Iterator<Item = &ModeDef> {
+        self.mode_defs.values()
+    }
+
+    /// Set the major mode of the buffer at `idx` from a registered
+    /// definition, installing its local keymap and re-parsing if the
+    /// language changed.
+    pub fn set_buffer_mode_by_name(&mut self, idx: usize, name: &str) -> Result<()> {
+        let def = self
+            .mode_defs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no major mode named {name}"))?;
+        let buf = &mut self.buffers[idx];
+        buf.set_mode(def.to_mode());
+        let local = def.keymap.filter(|k| !k.is_empty());
+        buf.set_local_keymap(local);
+        let lang = def.lang;
+        if lang.is_some() {
+            buf.set_syntax(None);
+            buf.set_syntax_dirty(true);
+        } else {
+            buf.set_syntax(None);
+            buf.set_syntax_dirty(false);
+        }
+        Ok(())
+    }
+
+    pub fn register_minor_def(&mut self, def: MinorModeDef) {
+        self.minor_defs.insert(def.name.clone(), def);
+    }
+
+    pub fn minor_def(&self, name: &str) -> Option<&MinorModeDef> {
+        self.minor_defs.get(name)
+    }
+
+    pub fn minor_defs(&self) -> impl Iterator<Item = &MinorModeDef> {
+        self.minor_defs.values()
+    }
+
+    /// Toggle a minor mode on the selected window's buffer; returns the new
+    /// state (true = enabled).
+    pub fn toggle_minor_mode(&mut self, idx: usize, name: &str) -> Result<bool> {
+        if !self.minor_defs.contains_key(name) {
+            return Err(anyhow::anyhow!("no minor mode named {name}"));
+        }
+        let buf = &mut self.buffers[idx];
+        if buf.minor_mode_enabled(name) {
+            buf.disable_minor_mode(name);
+            Ok(false)
+        } else {
+            buf.enable_minor_mode(name);
+            Ok(true)
+        }
+    }
+
+    pub fn set_minor_mode(&mut self, idx: usize, name: &str, enable: bool) -> Result<bool> {
+        if !self.minor_defs.contains_key(name) {
+            return Err(anyhow::anyhow!("no minor mode named {name}"));
+        }
+        let buf = &mut self.buffers[idx];
+        if enable {
+            buf.enable_minor_mode(name);
+        } else {
+            buf.disable_minor_mode(name);
+        }
+        Ok(enable)
+    }
+
+    pub fn minor_mode_enabled(&self, idx: usize, name: &str) -> bool {
+        self.buffers[idx].minor_mode_enabled(name)
+    }
+
+    /// Add a binding to the selected buffer's local keymap, creating it if
+    /// needed.
+    pub fn local_set_key(&mut self, idx: usize, seq: &[Key], cmd: &str) {
+        self.buffers[idx].local_keymap_mut().bind_sequence(seq, cmd);
+    }
 }
 
 #[cfg(test)]
@@ -760,5 +949,80 @@ mod tests {
         assert_eq!(ed.buf().point(), 1, "old window keeps its point");
         assert!(ed.other_window());
         assert_eq!(ed.buf().point(), 2);
+    }
+
+    #[test]
+    fn local_keymap_overrides_global() {
+        let mut ed = Editor::new(20, 80);
+        let idx = ed.selected_buffer_index();
+        ed.local_set_key(
+            idx,
+            &crate::key::parse_sequence("C-f").unwrap(),
+            "beginning-of-buffer",
+        );
+        ed.push_key(Key::ctrl('f'));
+        let seq = ed.pending_keys().to_vec();
+        assert_eq!(
+            ed.lookup_key(&seq),
+            Lookup::Command("beginning-of-buffer".into())
+        );
+        ed.clear_pending_keys();
+        ed.push_key(Key::ctrl('b'));
+        let seq = ed.pending_keys().to_vec();
+        assert_eq!(ed.lookup_key(&seq), Lookup::Command("backward-char".into()));
+    }
+
+    #[test]
+    fn minor_keymap_has_priority() {
+        let mut ed = Editor::new(20, 80);
+        let mut km = Keymap::new();
+        km.bind(Key::ctrl('f'), "end-of-buffer");
+        ed.register_minor_def(MinorModeDef {
+            name: "test-minor".into(),
+            doc: String::new(),
+            lighter: "TM".into(),
+            keymap: Some(km),
+        });
+        let idx = ed.selected_buffer_index();
+        ed.toggle_minor_mode(idx, "test-minor").unwrap();
+        ed.push_key(Key::ctrl('f'));
+        let seq = ed.pending_keys().to_vec();
+        assert_eq!(ed.lookup_key(&seq), Lookup::Command("end-of-buffer".into()));
+        ed.toggle_minor_mode(idx, "test-minor").unwrap();
+        ed.clear_pending_keys();
+        ed.push_key(Key::ctrl('f'));
+        let seq = ed.pending_keys().to_vec();
+        assert_eq!(ed.lookup_key(&seq), Lookup::Command("forward-char".into()));
+    }
+
+    #[test]
+    fn prefix_stays_in_source_keymap() {
+        let mut ed = Editor::new(20, 80);
+        let mut local = Keymap::new();
+        local.bind_sequence(&crate::key::parse_sequence("C-c C-c").unwrap(), "local-cmd");
+        let idx = ed.selected_buffer_index();
+        ed.buffers_mut()[idx].set_local_keymap(Some(local));
+        ed.push_key(Key::ctrl('c'));
+        assert_eq!(ed.lookup_key(&ed.pending_keys().to_vec()), Lookup::Prefix);
+        ed.push_key(Key::ctrl('c'));
+        assert_eq!(
+            ed.lookup_key(&ed.pending_keys().to_vec()),
+            Lookup::Command("local-cmd".into())
+        );
+    }
+
+    #[test]
+    fn mode_switch_installs_keymap_and_reparses() {
+        let mut ed = Editor::new(20, 80);
+        ed.buf_mut().insert("fn main() {}");
+        let idx = ed.selected_buffer_index();
+        ed.set_buffer_mode_by_name(idx, "rust-mode").unwrap();
+        assert_eq!(ed.buf().mode().name, "rust-mode");
+        assert!(ed.buf().syntax_dirty());
+        ed.refresh_syntax_current();
+        assert!(ed.buf().syntax().is_some());
+        ed.set_buffer_mode_by_name(idx, "fundamental-mode").unwrap();
+        assert!(ed.buf().syntax().is_none());
+        assert_eq!(ed.buf().mode().name, "fundamental-mode");
     }
 }

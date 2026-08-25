@@ -10,6 +10,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 pub const TAB_WIDTH: usize = 8;
+pub const GUTTER_WIDTH: u16 = 5;
 
 /// Line content excluding the trailing `\r`/`\n`.
 fn visible_content(s: ropey::RopeSlice<'_>) -> ropey::RopeSlice<'_> {
@@ -52,13 +53,42 @@ fn expand_tabs(s: ropey::RopeSlice<'_>) -> String {
 }
 
 fn render_window(frame: &mut Frame, buf: &emacs_core::buffer::Buffer, view: &View, rect: Rect) {
-    let lines: Vec<TuiLine> = (0..rect.height as usize)
+    let line_numbers = buf.minor_mode_enabled("line-numbers");
+    let gutter_w = if line_numbers { GUTTER_WIDTH } else { 0 };
+    let text_rect = if gutter_w > 0 && rect.width > gutter_w {
+        Rect {
+            x: rect.x + gutter_w,
+            width: rect.width - gutter_w,
+            ..rect
+        }
+    } else {
+        rect
+    };
+    if line_numbers && gutter_w > 0 && rect.width > gutter_w {
+        let gutter = Rect {
+            width: gutter_w,
+            ..rect
+        };
+        let nums: Vec<TuiLine> = (0..rect.height as usize)
+            .filter_map(|i| {
+                let line_idx = view.top_line + i;
+                (line_idx < buf.len_lines()).then(|| {
+                    TuiLine::styled(
+                        format!("{:>width$} ", line_idx + 1, width = gutter_w as usize - 1),
+                        Style::default().fg(Color::DarkGray),
+                    )
+                })
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(nums), gutter);
+    }
+    let lines: Vec<TuiLine> = (0..text_rect.height as usize)
         .filter_map(|i| {
             let line_idx = view.top_line + i;
             (line_idx < buf.len_lines()).then(|| render_line(buf, line_idx))
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), rect);
+    frame.render_widget(Paragraph::new(lines), text_rect);
 }
 
 fn style_for(group: Group) -> Style {
@@ -128,17 +158,23 @@ fn render_line(buf: &emacs_core::buffer::Buffer, line_idx: usize) -> TuiLine<'st
 }
 
 /// Modeline for a buffer, Emacs-style: `--`/`**` + `%` for read-only, name,
-/// mode, point position, line count.
-fn modeline(buf: &emacs_core::buffer::Buffer) -> String {
+/// modes (major + enabled minors' lighters), point position, line count.
+fn modeline(buf: &emacs_core::buffer::Buffer, ed: &Editor) -> String {
     let modified = if buf.modified() { "**" } else { "--" };
     let ro = if buf.read_only() { "%" } else { "-" };
     let file = buf
         .path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| buf.name().to_string());
+    let mut modes = buf.mode().name.clone();
+    for name in buf.enabled_minor() {
+        if let Some(def) = ed.minor_def(name) {
+            modes.push(' ');
+            modes.push_str(&def.lighter);
+        }
+    }
     format!(
-        "-{modified}{ro}-  {file}  ({})  L{} C{}  {} lines",
-        buf.mode().name,
+        "-{modified}{ro}-  {file}  ({modes})  L{} C{}  {} lines",
         buf.line_of_point() + 1,
         buf.column(),
         buf.len_lines()
@@ -184,7 +220,7 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         .add_modifier(Modifier::BOLD);
     if let Some(selected) = layouts.iter().find(|l| l.selected) {
         frame.render_widget(
-            Paragraph::new(Span::styled(modeline(selected.buf), ml_style)),
+            Paragraph::new(Span::styled(modeline(selected.buf, ed), ml_style)),
             modeline_rect,
         );
     }
@@ -245,7 +281,12 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     let line_slice = visible_content(buf.line(line));
     let col_chars = buf.column().min(line_slice.len_chars());
     let vis_col = visual_col(line_slice.slice(..col_chars));
-    let x = rect.x + vis_col.min(rect.width.saturating_sub(1) as usize) as u16;
+    let gutter = if buf.minor_mode_enabled("line-numbers") {
+        GUTTER_WIDTH
+    } else {
+        0
+    };
+    let x = rect.x + gutter + vis_col.min(rect.width.saturating_sub(1) as usize) as u16;
     let y = rect.y + row as u16;
     Some((x, y))
 }

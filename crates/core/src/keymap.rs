@@ -4,20 +4,20 @@ use std::collections::HashMap;
 
 use crate::key::Key;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Keymap {
     bindings: HashMap<Key, Action>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Action {
     Command(String),
     Prefix(Keymap),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lookup<'a> {
-    Command(&'a str),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    Command(String),
     /// The sequence so far is a valid prefix; more keys expected.
     Prefix,
     Unbound,
@@ -26,6 +26,10 @@ pub enum Lookup<'a> {
 impl Keymap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
     }
 
     /// Bind a full key sequence to a command, creating prefix keymaps as
@@ -59,11 +63,11 @@ impl Keymap {
     }
 
     /// Look up a full or partial key sequence (Emacs keymap-lookup semantics).
-    pub fn lookup(&self, seq: &[Key]) -> Lookup<'_> {
+    pub fn lookup(&self, seq: &[Key]) -> Lookup {
         match seq {
             [] => Lookup::Unbound,
             [key] => match self.bindings.get(key) {
-                Some(Action::Command(name)) => Lookup::Command(name),
+                Some(Action::Command(name)) => Lookup::Command(name.clone()),
                 Some(Action::Prefix(_)) => Lookup::Prefix,
                 None => Lookup::Unbound,
             },
@@ -116,7 +120,7 @@ mod tests {
         assert_eq!(km.lookup(&parse_sequence("C-x").unwrap()), Lookup::Prefix);
         assert_eq!(
             km.lookup(&parse_sequence("C-x C-f").unwrap()),
-            Lookup::Command("find-file")
+            Lookup::Command("find-file".into())
         );
         assert_eq!(
             km.lookup(&parse_sequence("C-x z").unwrap()),
@@ -124,7 +128,7 @@ mod tests {
         );
         assert_eq!(
             km.lookup(&parse_sequence("C-a").unwrap()),
-            Lookup::Command("beginning-of-line")
+            Lookup::Command("beginning-of-line".into())
         );
         assert_eq!(km.lookup(&parse_sequence("C-b").unwrap()), Lookup::Unbound);
     }

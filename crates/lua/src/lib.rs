@@ -17,6 +17,7 @@ use anyhow::{anyhow, Result};
 use mlua::{Function, Lua, Table};
 
 use emacs_core::editor::Editor;
+use emacs_core::keymap::Keymap;
 use emacs_core::script::ScriptHost;
 
 struct EditorRef(*mut Editor);
@@ -36,6 +37,25 @@ fn editor_ref(lua: &Lua) -> mlua::Result<&mut Editor> {
 
 fn anyhow_err(e: mlua::Error) -> anyhow::Error {
     anyhow!("{e}")
+}
+
+/// Build a keymap from a Lua table of `{ ["key seq"] = "command", ... }`.
+fn parse_keymap_table(_lua: &Lua, table: Option<Table>) -> mlua::Result<Option<Keymap>> {
+    let Some(t) = table else {
+        return Ok(None);
+    };
+    let mut km = Keymap::new();
+    for pair in t.pairs::<String, String>() {
+        let (seq, cmd) = pair?;
+        let keys =
+            emacs_core::key::parse_sequence(&seq).map_err(|e| mlua::Error::RuntimeError(e))?;
+        km.bind_sequence(&keys, &cmd);
+    }
+    if km.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(km))
+    }
 }
 
 pub struct LuaHost {
@@ -220,6 +240,132 @@ impl LuaHost {
                     .map_err(|e| mlua::Error::RuntimeError(e))?;
                 let ed = editor_ref(lua)?;
                 ed.keymap_mut().bind_sequence(&keys, &cmd);
+                Ok(())
+            })?,
+        )?;
+        emacs.set(
+            "local_set_key",
+            lua.create_function(|lua, (seq, cmd): (String, String)| {
+                let keys = emacs_core::key::parse_sequence(&seq)
+                    .map_err(|e| mlua::Error::RuntimeError(e))?;
+                let ed = editor_ref(lua)?;
+                let idx = ed.selected_buffer_index();
+                ed.local_set_key(idx, &keys, &cmd);
+                Ok(())
+            })?,
+        )?;
+
+        // --- major / minor modes -------------------------------------------
+        emacs.set(
+            "define_major_mode",
+            lua.create_function(|lua, (name, opts): (String, Table)| {
+                let lang = match opts.get::<Option<String>>("language")? {
+                    Some(s) if s == "rust" => Some(emacs_core::mode::Lang::Rust),
+                    Some(s) if s == "lua" => Some(emacs_core::mode::Lang::Lua),
+                    _ => None,
+                };
+                let def = emacs_core::mode::ModeDef {
+                    name: name.clone(),
+                    lang,
+                    indent_unit: opts.get::<Option<usize>>("indent")?,
+                    comment_prefix: opts.get::<Option<String>>("comment")?,
+                    keymap: parse_keymap_table(lua, opts.get::<Option<Table>>("keymap")?)?,
+                };
+                // register a command with the mode's name that switches to it
+                let mode_name = name.clone();
+                let setter = lua.create_function(move |lua, ()| {
+                    let ed = editor_ref(lua)?;
+                    let idx = ed.selected_buffer_index();
+                    ed.set_buffer_mode_by_name(idx, &mode_name)
+                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+                    Ok(())
+                })?;
+                {
+                    let ed = editor_ref(lua)?;
+                    ed.register_mode_def(def);
+                }
+                let globals = lua.globals();
+                let emacs: Table = globals.get("emacs")?;
+                let commands: Table = emacs.get("_commands")?;
+                let next: u32 = emacs.get("_next_id")?;
+                emacs.set("_next_id", next + 1)?;
+                commands.set(next, setter)?;
+                let ed = editor_ref(lua)?;
+                ed.commands_mut().add_lua(&name, next);
+                Ok(())
+            })?,
+        )?;
+        emacs.set(
+            "set_buffer_mode",
+            lua.create_function(|lua, name: String| {
+                let ed = editor_ref(lua)?;
+                let idx = ed.selected_buffer_index();
+                ed.set_buffer_mode_by_name(idx, &name)
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+            })?,
+        )?;
+        emacs.set(
+            "define_minor_mode",
+            lua.create_function(|lua, (name, opts): (String, Table)| {
+                let def = emacs_core::minor::MinorModeDef {
+                    name: name.clone(),
+                    doc: opts.get::<Option<String>>("doc")?.unwrap_or_default(),
+                    lighter: opts
+                        .get::<Option<String>>("lighter")?
+                        .unwrap_or(name.clone()),
+                    keymap: parse_keymap_table(lua, opts.get::<Option<Table>>("keymap")?)?,
+                };
+                // register a `<name>-mode` toggle command (Emacs convention)
+                let toggle_name = name.clone();
+                let toggler = lua.create_function(move |lua, ()| {
+                    let ed = editor_ref(lua)?;
+                    let idx = ed.selected_buffer_index();
+                    ed.toggle_minor_mode(idx, &toggle_name)
+                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+                    Ok(())
+                })?;
+                {
+                    let ed = editor_ref(lua)?;
+                    ed.register_minor_def(def);
+                }
+                let globals = lua.globals();
+                let emacs: Table = globals.get("emacs")?;
+                let commands: Table = emacs.get("_commands")?;
+                let next: u32 = emacs.get("_next_id")?;
+                emacs.set("_next_id", next + 1)?;
+                commands.set(next, toggler)?;
+                let ed = editor_ref(lua)?;
+                ed.commands_mut().add_lua(&format!("{name}-mode"), next);
+                Ok(())
+            })?,
+        )?;
+        emacs.set(
+            "minor_mode_enable",
+            lua.create_function(|lua, name: String| {
+                let ed = editor_ref(lua)?;
+                let idx = ed.selected_buffer_index();
+                ed.set_minor_mode(idx, &name, true)
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+                Ok(())
+            })?,
+        )?;
+        emacs.set(
+            "minor_mode_disable",
+            lua.create_function(|lua, name: String| {
+                let ed = editor_ref(lua)?;
+                let idx = ed.selected_buffer_index();
+                ed.set_minor_mode(idx, &name, false)
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+                Ok(())
+            })?,
+        )?;
+        emacs.set(
+            "minor_mode_toggle",
+            lua.create_function(|lua, name: String| {
+                let ed = editor_ref(lua)?;
+                let idx = ed.selected_buffer_index();
+                ed.toggle_minor_mode(idx, &name)
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
                 Ok(())
             })?,
         )?;

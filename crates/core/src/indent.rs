@@ -137,9 +137,9 @@ pub fn indent_line(ed: &mut Editor) {
 /// Insert a newline and indent the new line to match the context (RET in
 /// programming modes).
 pub fn newline_and_indent(ed: &mut Editor) {
-    let mode = ed.buf().mode();
+    let indent = ed.buf().mode().indent_unit;
     ed.buf_mut().insert("\n");
-    let Some(unit) = mode.indent_unit else {
+    let Some(unit) = indent else {
         return;
     };
     let buf = ed.buf_mut();
@@ -176,11 +176,11 @@ pub fn backward_delete_indent(ed: &mut Editor) -> bool {
 mod tests {
     use super::*;
     use crate::editor::Editor;
-    use crate::mode::{LUA, RUST};
+    use crate::mode::{lua, rust};
 
     fn rust_ed(text: &str) -> Editor {
         let mut ed = Editor::new(20, 80);
-        ed.buf_mut().set_mode(RUST);
+        ed.buf_mut().set_mode(rust());
         ed.buf_mut().insert(text);
         ed
     }
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn lua_end_outdents() {
         let mut ed = Editor::new(20, 80);
-        ed.buf_mut().set_mode(LUA);
+        ed.buf_mut().set_mode(lua());
         ed.buf_mut().insert("function f()\n    print()\nend");
         ed.buf_mut().move_to_buffer_end();
         newline_and_indent(&mut ed);

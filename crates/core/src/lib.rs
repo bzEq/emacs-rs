@@ -8,6 +8,7 @@ pub mod key;
 pub mod keymap;
 pub mod kill_ring;
 pub mod minibuffer;
+pub mod minor;
 pub mod mode;
 pub mod script;
 pub mod syntax;
