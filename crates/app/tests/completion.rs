@@ -189,3 +189,23 @@ fn find_file_defaults_to_buffer_file_directory() {
     );
     em.quit();
 }
+
+#[test]
+fn find_file_minibuffer_scrolls_long_inputs() {
+    let em = Em::spawn();
+    let d = em.scratch.join("dir").join("d".repeat(50));
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("hello.txt"), "hi\n").unwrap();
+    let d_s = d.to_string_lossy().into_owned();
+    let mut em = Em::spawn();
+    assert!(em.wait_for("lines", 5000), "editor ready");
+    em.keys(b"\x18\x06"); // C-x C-f
+    assert!(em.wait_for("Find file:", 4000), "minibuffer opened");
+    em.type_str(&format!("{d_s}/hel"));
+    // the line overflows 80 columns; the minibuffer scrolls so the typed
+    // tail (and the caret) stay visible
+    em.expect_row(23, "hel", "long input tail visible");
+    em.keys(b"\r");
+    assert!(em.wait_for("hi", 5000), "file opened");
+    em.quit();
+}

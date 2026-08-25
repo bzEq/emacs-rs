@@ -261,6 +261,15 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
             cand_rect,
         );
     }
+    let line_rect = if ed.minibuffer().is_some() && completing {
+        minibuf_rect
+    } else {
+        echo_rect
+    };
+
+    // The minibuffer scrolls horizontally so the caret stays visible when
+    // the line overflows the echo area (long prompts, long typed paths).
+    let mut scroll = 0usize;
     let echo_text: String = if let Some(mb) = ed.minibuffer() {
         let caret = if mb.cursor == mb.input.chars().count() {
             "█"
@@ -268,18 +277,23 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
             ""
         };
         // caret sits between the typed input and the completion preview
-        format!("{}{}{}{}", mb.prompt, mb.input, caret, mb.preview)
+        let line = format!("{}{}{}{}", mb.prompt, mb.input, caret, mb.preview);
+        let width = line_rect.width.max(1) as usize;
+        let cursor_col = mb.prompt.chars().count() + mb.cursor;
+        if line.chars().count() > width && cursor_col >= width {
+            scroll = cursor_col - width + 1;
+        }
+        if scroll > 0 {
+            line.chars().skip(scroll).collect()
+        } else {
+            line
+        }
     } else if let Some(emacs_core::minibuffer::Pending::YesNo { prompt, .. }) = ed.pending() {
         prompt.clone()
     } else if let Some(msg) = ed.echo() {
         msg.to_string()
     } else {
         String::new()
-    };
-    let line_rect = if ed.minibuffer().is_some() && completing {
-        minibuf_rect
-    } else {
-        echo_rect
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
@@ -292,6 +306,7 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     // --- cursor ------------------------------------------------------------
     if let Some(mb) = ed.minibuffer() {
         let x = (line_rect.x as usize + mb.prompt.chars().count() + mb.cursor)
+            .saturating_sub(scroll)
             .min((line_rect.x + line_rect.width.saturating_sub(1)) as usize);
         return Some((x as u16, line_rect.y));
     }
