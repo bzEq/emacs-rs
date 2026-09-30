@@ -65,6 +65,23 @@ fn main() -> Result<()> {
     };
     let file_arg = cli.file;
 
+    // The Lua runtime is required: resolve it and check every module
+    // exists before touching the terminal, so misconfiguration is a clean
+    // fatal error instead of a broken editor.
+    let runtime_dir = match emacs_lua::find_runtime() {
+        Ok(dir) => dir,
+        Err(msg) => fatal(&msg),
+    };
+    if let Some(missing) = emacs_lua::RUNTIME_MODULES
+        .iter()
+        .find(|m| !runtime_dir.join(m).is_file())
+    {
+        fatal(&format!(
+            "required Lua runtime module is missing: {}",
+            runtime_dir.join(missing).display()
+        ));
+    }
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -81,41 +98,28 @@ fn main() -> Result<()> {
 
     let mut ed = Editor::new(size.height.saturating_sub(2) as usize, size.width as usize);
 
-    // LuaJIT scripting engine: the lua/ runtime directory (all default
+    // LuaJIT scripting engine: the required lua/ runtime (all default
     // commands, keybindings, and modes), then the user's init.lua.
-    match LuaHost::new() {
-        Ok(host) => {
-            ed.attach_script(Box::new(host));
-            let mut runtime_ok = true;
-            match lua_dir() {
-                Ok(dir) => {
-                    if let Err(e) = ed.load_script_dir(&dir) {
-                        ed.error(format!("error loading {}: {e}", dir.display()));
-                        runtime_ok = false;
-                    }
-                }
-                Err(msg) => {
-                    ed.error(msg);
-                    runtime_ok = false;
-                }
+    let host = match LuaHost::new() {
+        Ok(host) => host,
+        Err(e) => fatal(&format!("LuaJIT unavailable: {e}")),
+    };
+    ed.attach_script(Box::new(host));
+    if let Err(e) = ed.load_runtime(&runtime_dir) {
+        fatal(&format!("failed to load the Lua runtime: {e}"));
+    }
+    let init = cli.init.clone().or_else(init_file);
+    if let Some(init) = init {
+        if init.exists() {
+            if let Err(e) = ed.load_script(&init) {
+                ed.error(format!("error loading {}: {e}", init.display()));
             }
-            let init = cli.init.clone().or_else(init_file);
-            if let Some(init) = init {
-                if init.exists() {
-                    if let Err(e) = ed.load_script(&init) {
-                        ed.error(format!("error loading {}: {e}", init.display()));
-                    }
-                } else if cli.init.is_some() {
-                    ed.error(format!("cannot open init file: {}", init.display()));
-                }
-            }
-            if runtime_ok {
-                if let Err(e) = ed.run_startup(file_arg.as_deref()) {
-                    ed.error(e.to_string());
-                }
-            }
+        } else if cli.init.is_some() {
+            ed.error(format!("cannot open init file: {}", init.display()));
         }
-        Err(e) => eprintln!("LuaJIT unavailable: {e}"),
+    }
+    if let Err(e) = ed.run_startup(file_arg.as_deref()) {
+        ed.error(e.to_string());
     }
 
     let result = run(&mut ed, &mut terminal);
@@ -125,53 +129,13 @@ fn main() -> Result<()> {
     result
 }
 
-/// Locate the Lua runtime directory: `EMACS_RS_LUA_DIR`, a `lua` directory
-/// next to the executable, `../lua` relative to it (the repo layout when
-/// running from `target/`), or the source tree `lua/` (dev builds).
-///
-/// A candidate is only accepted if it contains the runtime entry point
-/// (`00-api.lua`), so a stale or unrelated `lua/` directory near the
-/// binary cannot silently shadow the real runtime and break the editor.
-fn lua_dir() -> Result<PathBuf, String> {
-    if let Some(dir) = std::env::var_os("EMACS_RS_LUA_DIR") {
-        let dir = PathBuf::from(dir);
-        if runtime_entry(&dir) {
-            return Ok(dir);
-        }
-        return Err(format!(
-            "EMACS_RS_LUA_DIR is set to {}, but the Lua runtime (00-api.lua) is not there",
-            dir.display()
-        ));
-    }
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(base) = exe.parent() {
-            candidates.push(base.join("lua"));
-            if let Some(parent) = base.parent() {
-                candidates.push(parent.join("lua"));
-            }
-        }
-    }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("lua"),
-    );
-    for dir in candidates {
-        if runtime_entry(&dir) {
-            return Ok(dir);
-        }
-    }
-    Err(
-        "cannot find the Lua runtime: searched lua/ next to the executable, ../lua, \
-         and the source tree; set EMACS_RS_LUA_DIR"
-            .into(),
-    )
-}
-
-fn runtime_entry(dir: &std::path::Path) -> bool {
-    dir.join("00-api.lua").is_file()
+/// Report a fatal runtime error and exit: restore the terminal first, so
+/// this is safe both before and after entering the alternate screen.
+fn fatal(msg: &str) -> ! {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    eprintln!("em: fatal: {msg}");
+    std::process::exit(1);
 }
 
 fn init_file() -> Option<PathBuf> {

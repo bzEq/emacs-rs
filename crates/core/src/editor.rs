@@ -703,11 +703,12 @@ impl Editor {
         res
     }
 
-    /// Load every `*.lua` file in a directory, in lexical order.
-    pub fn load_script_dir(&mut self, dir: &Path) -> Result<()> {
+    /// Load the required runtime modules from a directory, in the order the
+    /// scripting engine defines.
+    pub fn load_runtime(&mut self, dir: &Path) -> Result<()> {
         let mut res = Ok(());
         self.with_host(|ed, host| {
-            res = host.load_dir(dir, ed);
+            res = host.load_runtime(dir, ed);
         });
         res
     }

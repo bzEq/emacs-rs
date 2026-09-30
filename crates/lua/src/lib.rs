@@ -32,6 +32,71 @@ use emacs_core::keymap::{Keymap, Lookup};
 use emacs_core::mode::Lang;
 use emacs_core::script::{CommandOutcome, PendingRequest, ResumeValue, ScriptHost};
 
+/// The Lua runtime modules, loaded in this exact order. Every module is
+/// required: a missing or broken one is a fatal error, reported by the
+/// app before the editor starts.
+pub const RUNTIME_MODULES: &[&str] = &[
+    "api.lua",
+    "motion.lua",
+    "editing.lua",
+    "search.lua",
+    "windows.lua",
+    "files.lua",
+    "modes.lua",
+    "dired.lua",
+    "help.lua",
+    "bindings.lua",
+];
+
+/// Locate the Lua runtime directory: `EMACS_RS_LUA_DIR`, a `lua` directory
+/// next to the executable, `../lua` relative to it (the repo layout when
+/// running from `target/`), or the source tree `lua/` (dev builds).
+///
+/// A candidate is only accepted if it contains the runtime entry point
+/// (`api.lua`), so a stale or unrelated `lua/` directory near the binary
+/// cannot silently shadow the real runtime.
+pub fn find_runtime() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("EMACS_RS_LUA_DIR") {
+        let dir = PathBuf::from(dir);
+        if runtime_entry(&dir) {
+            return Ok(dir);
+        }
+        return Err(format!(
+            "EMACS_RS_LUA_DIR is set to {}, but the Lua runtime (api.lua) is not there",
+            dir.display()
+        ));
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(base) = exe.parent() {
+            candidates.push(base.join("lua"));
+            if let Some(parent) = base.parent() {
+                candidates.push(parent.join("lua"));
+            }
+        }
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("lua"),
+    );
+    for dir in candidates {
+        if runtime_entry(&dir) {
+            return Ok(dir);
+        }
+    }
+    Err(
+        "cannot find the Lua runtime: searched lua/ next to the executable, ../lua, \
+         and the source tree; set EMACS_RS_LUA_DIR"
+            .into(),
+    )
+}
+
+fn runtime_entry(dir: &Path) -> bool {
+    dir.join(RUNTIME_MODULES[0]).is_file()
+}
+
 struct EditorRef(*mut Editor);
 
 unsafe impl Send for EditorRef {}
@@ -1016,17 +1081,26 @@ impl ScriptHost for LuaHost {
         })
     }
 
-    fn load_dir(&mut self, dir: &Path, editor: &mut Editor) -> Result<()> {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "lua"))
-            .collect();
-        files.sort();
-        for f in &files {
-            self.load_file(f, editor)?;
+    /// Load the runtime modules from `dir`, in the hardcoded order. A
+    /// missing module is a fatal error; a module that fails to execute or
+    /// a runtime that never installs its entry points is fatal too.
+    fn load_runtime(&mut self, dir: &Path, editor: &mut Editor) -> Result<()> {
+        for name in RUNTIME_MODULES {
+            let path = dir.join(name);
+            if !path.is_file() {
+                return Err(anyhow!(
+                    "required Lua runtime module is missing: {}",
+                    path.display()
+                ));
+            }
+            self.load_file(&path, editor)?;
         }
-        Ok(())
+        with_editor(&self.lua, editor, |lua| {
+            internals_table(lua)?;
+            run_command_fn(lua)?;
+            startup_fn(lua)?;
+            Ok(())
+        })
     }
 
     fn call_command(

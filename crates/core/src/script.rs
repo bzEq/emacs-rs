@@ -43,8 +43,9 @@ pub trait ScriptHost {
     /// Load a script file (a Lua chunk).
     fn load_file(&mut self, path: &Path, editor: &mut Editor) -> Result<()>;
 
-    /// Load every `*.lua` file in a directory, in lexical order.
-    fn load_dir(&mut self, dir: &Path, editor: &mut Editor) -> Result<()>;
+    /// Load the required runtime modules from `dir`, in the order the
+    /// engine defines. A missing or broken module is a fatal error.
+    fn load_runtime(&mut self, dir: &Path, editor: &mut Editor) -> Result<()>;
 
     /// Invoke a command by name. `extra` carries the character for
     /// self-insert-command.
@@ -74,7 +75,7 @@ impl ScriptHost for NullHost {
         Ok(())
     }
 
-    fn load_dir(&mut self, _dir: &Path, _editor: &mut Editor) -> Result<()> {
+    fn load_runtime(&mut self, _dir: &Path, _editor: &mut Editor) -> Result<()> {
         Ok(())
     }
 

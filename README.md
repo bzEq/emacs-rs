@@ -89,20 +89,24 @@ cargo build --release
 
 ## The Lua runtime
 
-`lua/` loads in lexical order before the user's init.lua:
+The runtime is a fixed set of modules in `lua/`. The list and load order
+are hardcoded in `emacs-lua` (`RUNTIME_MODULES`); a missing or broken
+module is a fatal error — the editor reports it and exits instead of
+starting without a working runtime. Extra modules are not auto-loaded:
+`dofile` them from `init.lua`.
 
 | File | Contents |
 |---|---|
-| `00-api.lua` | state, undo, kill ring, prefix args, command machinery, the `emacs` API |
-| `10-motion.lua` | motion commands |
-| `20-editing.lua` | editing commands, auto-indentation |
-| `30-search.lua` | incremental search |
-| `40-windows.lua` | window commands |
-| `50-files.lua` | find/save/write/switch/kill-buffer, file completion |
-| `60-modes.lua` | built-in major and minor modes |
-| `70-dired.lua` | the directory editor |
-| `80-help.lua` | `M-x`, describe-key, describe-bindings |
-| `90-bindings.lua` | the default global keymap |
+| `api.lua` | state, undo, kill ring, prefix args, command machinery, the `emacs` API |
+| `motion.lua` | motion commands |
+| `editing.lua` | editing commands, auto-indentation |
+| `search.lua` | incremental search |
+| `windows.lua` | window commands |
+| `files.lua` | find/save/write/switch/kill-buffer, file completion |
+| `modes.lua` | built-in major and minor modes |
+| `dired.lua` | the directory editor |
+| `help.lua` | `M-x`, describe-key, describe-bindings |
+| `bindings.lua` | the default global keymap |
 
 The `emacs` module is the user-facing API; the `raw` module underneath it
 exposes the Rust primitives (rope editing, motion, search, buffers,

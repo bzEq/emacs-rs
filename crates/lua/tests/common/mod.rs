@@ -30,8 +30,7 @@ impl LuaEd {
         let mut ed = Editor::new(24, 80);
         let host = LuaHost::new().expect("LuaJIT host");
         ed.attach_script(Box::new(host));
-        ed.load_script_dir(&lua_dir())
-            .expect("defaults runtime loads");
+        ed.load_runtime(&lua_dir()).expect("defaults runtime loads");
         LuaEd { ed }
     }
 
