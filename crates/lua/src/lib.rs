@@ -195,10 +195,12 @@ fn interpret(thread: Thread, v: Value) -> mlua::Result<(CommandOutcome, Option<F
                 "read_string" => {
                     let prompt: String = t.get("prompt")?;
                     let completion: Option<Function> = t.get("completion")?;
+                    let initial: Option<String> = t.get("initial")?;
                     (
                         CommandOutcome::Pending(PendingRequest::ReadString {
                             prompt,
                             completion: completion.is_some(),
+                            initial: initial.unwrap_or_default(),
                         }),
                         completion,
                     )
@@ -732,6 +734,17 @@ impl LuaHost {
             })?,
         )?;
         raw.set(
+            "bind_minibuffer",
+            lua.create_function(|lua, (seq, cmd): (String, String)| {
+                let keys =
+                    emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
+                editor_ref(lua)?
+                    .minibuffer_keymap_mut()
+                    .bind_sequence(&keys, &cmd);
+                Ok(())
+            })?,
+        )?;
+        raw.set(
             "local_set_key",
             lua.create_function(|lua, (seq, cmd): (String, String)| {
                 let keys =
@@ -883,6 +896,78 @@ impl LuaHost {
                 let ed = editor_ref(lua)?;
                 let idx = ed.selected_buffer_index();
                 Ok(ed.minor_mode_enabled(idx, &name))
+            })?,
+        )?;
+
+        // -- minibuffer input editing ---------------------------------------
+        raw.set(
+            "mb_delete_backward",
+            lua.create_function(|lua, ()| {
+                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
+                    mb.delete_backward();
+                }
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "mb_delete_forward",
+            lua.create_function(|lua, ()| {
+                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
+                    mb.delete_forward();
+                }
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "mb_move_left",
+            lua.create_function(|lua, ()| {
+                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
+                    mb.move_left();
+                }
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "mb_move_right",
+            lua.create_function(|lua, ()| {
+                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
+                    mb.move_right();
+                }
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "mb_to_start",
+            lua.create_function(|lua, ()| {
+                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
+                    mb.to_start();
+                }
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "mb_to_end",
+            lua.create_function(|lua, ()| {
+                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
+                    mb.to_end();
+                }
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "mb_kill_line",
+            lua.create_function(|lua, ()| {
+                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
+                    mb.kill_line();
+                }
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "mb_history_step",
+            lua.create_function(|lua, dir: i64| {
+                editor_ref(lua)?.minibuffer_history_step(dir as isize);
+                Ok(())
             })?,
         )?;
 

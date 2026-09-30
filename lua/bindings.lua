@@ -77,3 +77,27 @@ for d = 1, 9 do
   bind("C-" .. d, "digit-argument-" .. d)
   bind("M-" .. d, "digit-argument-" .. d)
 end
+
+-- The minibuffer keymap overrides the global map while the minibuffer is
+-- active (Emacs's minibuffer-local-map); everything else falls through to
+-- the global map, so user bindings keep working in the minibuffer.
+local function mbind(seq, cmd)
+  raw.bind_minibuffer(seq, cmd)
+end
+mbind("DEL", "minibuf-backward-delete-char")
+mbind("C-h", "minibuf-backward-delete-char") -- terminals that send ^H for Backspace
+mbind("C-d", "minibuf-delete-char")
+mbind("<delete>", "minibuf-delete-char")
+mbind("C-b", "minibuf-backward-char")
+mbind("<left>", "minibuf-backward-char")
+mbind("C-f", "minibuf-forward-char")
+mbind("<right>", "minibuf-forward-char")
+mbind("C-a", "minibuf-beginning-of-line")
+mbind("<home>", "minibuf-beginning-of-line")
+mbind("C-e", "minibuf-end-of-line")
+mbind("<end>", "minibuf-end-of-line")
+mbind("C-k", "minibuf-kill-line")
+mbind("C-p", "minibuf-previous-history")
+mbind("C-n", "minibuf-next-history")
+mbind("<up>", "minibuf-previous-history")
+mbind("<down>", "minibuf-next-history")

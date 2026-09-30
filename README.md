@@ -47,7 +47,15 @@ directory, so users can redefine any part of the editor from their
   - Classic keybindings: motion/editing/kill-ring/undo/mark, `C-x` prefix
     keys, Esc as Meta
   - Command system: `M-x` runs any command by name, with automatic
-    completion (common prefix fills as you type, TAB cycles)
+    completion (common prefix fills as you type, TAB cycles); the
+    minibuffer pre-fills the default directory for find-file (editable
+    input, Emacs-style), keeps an input history (`C-p`/`C-n` recall), and
+    supports `C-f`/`C-b`/`C-a`/`C-e`/`C-d` editing; typing `/` over the
+    pre-filled directory replaces it (file-name-shadow)
+  - The minibuffer has its own keymap (defined in Lua, like Emacs's
+    `minibuffer-local-map`) that inherits the global map: user bindings
+    keep working while the minibuffer is active (`C-x C-c` quits from
+    there, custom keys run normally)
   - Incremental search: `C-s` / `C-r`, case-insensitive, wraps around,
     `C-g` aborts
   - Undo (with boundaries), kill ring (consecutive kills accumulate),

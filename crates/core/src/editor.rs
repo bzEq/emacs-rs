@@ -26,6 +26,8 @@ pub enum KeymapSource {
     /// An enabled minor mode keymap; index into the buffer's enabled list,
     /// 0 = most recently enabled.
     Minor(usize),
+    /// The minibuffer-local keymap (active while reading input).
+    Minibuffer,
 }
 
 /// One window's rendering info, handed to the UI.
@@ -48,6 +50,11 @@ pub struct Editor {
     /// True if `echo` is an error.
     echo_error: bool,
     minibuffer: Option<Minibuffer>,
+    /// Minibuffer-local keymap: overrides the global keymap while the
+    /// minibuffer is active (Emacs's minibuffer-local-map).
+    minibuffer_keymap: Keymap,
+    /// Accepted minibuffer inputs, for C-n/C-p history recall.
+    minibuffer_history: Vec<String>,
     /// What a suspended command coroutine is waiting for.
     pending: Option<PendingRequest>,
     /// Keys of the key sequence in progress (for prefix resolution).
@@ -82,6 +89,8 @@ impl Editor {
             echo: None,
             echo_error: false,
             minibuffer: None,
+            minibuffer_keymap: Keymap::new(),
+            minibuffer_history: Vec::new(),
             pending: None,
             pending_keys: Vec::new(),
             esc_prefix: false,
@@ -392,6 +401,36 @@ impl Editor {
         &mut self.keymap
     }
 
+    pub fn minibuffer_keymap_mut(&mut self) -> &mut Keymap {
+        &mut self.minibuffer_keymap
+    }
+
+    /// Look up a key sequence while the minibuffer is active: the
+    /// minibuffer-local keymap first, then the global keymap (Emacs's
+    /// minibuffer-local-map inherits the global map).
+    pub fn lookup_minibuffer_key(&mut self, seq: &[Key]) -> Lookup {
+        if seq.is_empty() {
+            return Lookup::Unbound;
+        }
+        if let Some(src) = self.pending_keymap {
+            let map = self.keymap_for_source(src);
+            return map.lookup(seq);
+        }
+        let sources = [KeymapSource::Minibuffer, KeymapSource::Global];
+        for src in sources {
+            let map = self.keymap_for_source(src);
+            match map.lookup(seq) {
+                Lookup::Unbound => continue,
+                Lookup::Prefix => {
+                    self.pending_keymap = Some(src);
+                    return Lookup::Prefix;
+                }
+                cmd => return cmd,
+            }
+        }
+        Lookup::Unbound
+    }
+
     /// Look up a key sequence against the active keymaps: enabled minor mode
     /// keymaps (most recently enabled first), the buffer's local keymap,
     /// then the global keymap. A prefix result fixes the source for the
@@ -439,6 +478,7 @@ impl Editor {
     fn keymap_for_source(&self, src: KeymapSource) -> &Keymap {
         match src {
             KeymapSource::Global => &self.keymap,
+            KeymapSource::Minibuffer => &self.minibuffer_keymap,
             KeymapSource::Local => self.buffers[self.selected_buffer_index()]
                 .local_keymap()
                 .expect("local keymap exists"),
@@ -559,6 +599,50 @@ impl Editor {
         self.minibuffer.as_mut()
     }
 
+    /// Record an accepted minibuffer input in the history (consecutive
+    /// duplicates collapse).
+    pub fn push_minibuffer_history(&mut self, entry: String) {
+        if entry.is_empty() {
+            return;
+        }
+        if self.minibuffer_history.last() != Some(&entry) {
+            self.minibuffer_history.push(entry);
+        }
+    }
+
+    /// Reinstall a saved minibuffer state (after a command ran while the
+    /// minibuffer was active).
+    pub fn restore_minibuffer(&mut self, mb: Minibuffer) {
+        self.pending = Some(PendingRequest::ReadString {
+            prompt: mb.prompt.clone(),
+            completion: mb.completion,
+            initial: mb.input.clone(),
+        });
+        self.minibuffer = Some(mb);
+    }
+
+    /// C-n / C-p: step through the input history, recalling entries into
+    /// the minibuffer input. Past the last entry the input is empty.
+    pub fn minibuffer_history_step(&mut self, dir: isize) {
+        let Some(mb) = self.minibuffer.as_mut() else {
+            return;
+        };
+        let len = self.minibuffer_history.len() as isize;
+        let idx = mb.history_index as isize + dir;
+        if !(0..=len).contains(&idx) {
+            return;
+        }
+        mb.history_index = idx as usize;
+        mb.input = if (idx as usize) < self.minibuffer_history.len() {
+            self.minibuffer_history[idx as usize].clone()
+        } else {
+            String::new()
+        };
+        mb.cursor = mb.input.len();
+        mb.preview.clear();
+        mb.candidates.clear();
+    }
+
     pub fn pending(&self) -> Option<&PendingRequest> {
         self.pending.as_ref()
     }
@@ -602,9 +686,19 @@ impl Editor {
                 self.replay_key = None;
                 key
             }
-            CommandOutcome::Pending(PendingRequest::ReadString { prompt, completion }) => {
-                self.minibuffer = Some(Minibuffer::new(prompt.clone(), completion));
-                self.pending = Some(PendingRequest::ReadString { prompt, completion });
+            CommandOutcome::Pending(PendingRequest::ReadString {
+                prompt,
+                completion,
+                initial,
+            }) => {
+                let mut mb = Minibuffer::new(prompt.clone(), completion, Some(initial.clone()));
+                mb.history_index = self.minibuffer_history.len();
+                self.minibuffer = Some(mb);
+                self.pending = Some(PendingRequest::ReadString {
+                    prompt,
+                    completion,
+                    initial,
+                });
                 None
             }
             CommandOutcome::Pending(p) => {
@@ -872,6 +966,7 @@ mod tests {
         let key = ed.finish_command(CommandOutcome::Pending(PendingRequest::ReadString {
             prompt: "M-x ".into(),
             completion: true,
+            initial: String::new(),
         }));
         assert!(key.is_none());
         assert!(ed.minibuffer().is_some());
@@ -896,6 +991,37 @@ mod tests {
         assert_eq!(key, Some(Key::ctrl('a')));
         // replay key is consumed
         assert!(ed.finish_command(CommandOutcome::Done).is_none());
+    }
+
+    #[test]
+    fn minibuffer_history_recalls_entries() {
+        let mut ed = Editor::new(20, 80);
+        ed.push_minibuffer_history("first".into());
+        ed.push_minibuffer_history("second".into());
+        ed.push_minibuffer_history("second".into()); // consecutive dup collapses
+        assert_eq!(ed.minibuffer_history.len(), 2);
+
+        ed.finish_command(CommandOutcome::Pending(PendingRequest::ReadString {
+            prompt: "M-x ".into(),
+            completion: true,
+            initial: String::new(),
+        }));
+        // C-p recalls the most recent entry, then the one before it
+        ed.minibuffer_history_step(-1);
+        assert_eq!(ed.minibuffer().unwrap().input, "second");
+        ed.minibuffer_history_step(-1);
+        assert_eq!(ed.minibuffer().unwrap().input, "first");
+        // at the oldest entry, C-p stops
+        ed.minibuffer_history_step(-1);
+        assert_eq!(ed.minibuffer().unwrap().input, "first");
+        // C-n walks forward, past the end the input is empty
+        ed.minibuffer_history_step(1);
+        ed.minibuffer_history_step(1);
+        assert_eq!(ed.minibuffer().unwrap().input, "");
+        // editing after recall inserts into the recalled text
+        ed.minibuffer_history_step(-1);
+        ed.minibuffer_mut().unwrap().insert_char('!');
+        assert_eq!(ed.minibuffer().unwrap().input, "second!");
     }
 
     #[test]

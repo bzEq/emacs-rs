@@ -214,11 +214,12 @@ end
 
 -- ---- synchronous reads (coroutine yields) ----------------------------------
 
-function emacs.read_string(prompt, completion)
+function emacs.read_string(prompt, completion, initial)
   local result = coroutine.yield({
     type = "read_string",
     prompt = prompt,
     completion = completion,
+    initial = initial,
   })
   return result
 end
@@ -245,6 +246,44 @@ function M.run_hook(name)
     fn()
   end
 end
+
+-- ---- minibuffer editing commands (bound in the minibuffer keymap) ----------
+
+M.define("minibuf-backward-delete-char", function()
+  raw.mb_delete_backward()
+end)
+
+M.define("minibuf-delete-char", function()
+  raw.mb_delete_forward()
+end)
+
+M.define("minibuf-backward-char", function()
+  raw.mb_move_left()
+end)
+
+M.define("minibuf-forward-char", function()
+  raw.mb_move_right()
+end)
+
+M.define("minibuf-beginning-of-line", function()
+  raw.mb_to_start()
+end)
+
+M.define("minibuf-end-of-line", function()
+  raw.mb_to_end()
+end)
+
+M.define("minibuf-kill-line", function()
+  raw.mb_kill_line()
+end)
+
+M.define("minibuf-previous-history", function()
+  raw.mb_history_step(-1)
+end)
+
+M.define("minibuf-next-history", function()
+  raw.mb_history_step(1)
+end)
 
 -- ---- modes -----------------------------------------------------------------
 

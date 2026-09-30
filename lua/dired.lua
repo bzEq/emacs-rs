@@ -119,8 +119,7 @@ end
 
 M.define("dired", function()
   local default = M.default_directory()
-  local input = emacs.read_string("Dired (directory): " .. default .. " ",
-      M.complete_file_names)
+  local input = emacs.read_string("Dired (directory): ", M.complete_file_names, default)
   local dir
   if not input or input:match("^%s*$") == "" then
     dir = default

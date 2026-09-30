@@ -14,8 +14,13 @@ use crate::key::Key;
 /// keys to the matching handler until the coroutine is resumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingRequest {
-    /// Reading a string from the minibuffer; completion may be active.
-    ReadString { prompt: String, completion: bool },
+    /// Reading a string from the minibuffer; completion may be active and
+    /// the input may be pre-filled with `initial` (cursor at its end).
+    ReadString {
+        prompt: String,
+        completion: bool,
+        initial: String,
+    },
     /// A yes/no question.
     ReadYesNo { prompt: String },
     /// A raw key press (isearch, describe-key).

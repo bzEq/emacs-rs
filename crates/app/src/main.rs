@@ -227,6 +227,14 @@ fn to_key(ke: &crossterm::event::KeyEvent) -> Option<Key> {
 /// One key press into the current input state (a pending command request,
 /// or the normal keymap dispatch).
 fn handle_key(ed: &mut Editor, key: Key) -> Result<()> {
+    if std::env::var_os("EM_DEBUG_KEYS").is_some() {
+        eprintln!(
+            "em: key code={:?} mods={:?} -> {key} (pending={:?})",
+            key.code,
+            key.mods,
+            ed.pending()
+        );
+    }
     let key = translate_after_ctrl_x(ed, key);
     // Esc acts as a Meta prefix (ESC x == M-x).
     if key.code == KeyCode::Esc && key.mods.is_empty() {
@@ -389,60 +397,25 @@ fn pending_key(ed: &mut Editor, key: Key) -> Result<()> {
     }
 }
 
-/// Keys while the minibuffer is reading input.
+/// Keys while the minibuffer is reading input. The minibuffer-local
+/// keymap overrides the global map (RET/TAB/C-g stay structural), and
+/// everything else falls through to the global keymap, so user bindings
+/// keep working while the minibuffer is active (Emacs behavior).
 fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
     use KeyCode::*;
     let m = key.mods;
+
+    // structural keys: abort, accept, complete
+    if matches!(key.code, Char('g') if m.contains(Modifiers::CONTROL)) {
+        ed.clear_pending_keys();
+        ed.message("Quit");
+        return resume(ed, ResumeValue::String(None));
+    }
     match key.code {
-        Char(c) if m.contains(Modifiers::CONTROL) => match c {
-            'g' => {
-                ed.message("Quit");
-                return resume(ed, ResumeValue::String(None));
-            }
-            'a' => {
-                if let Some(mb) = ed.minibuffer_mut() {
-                    mb.to_start();
-                }
-            }
-            'e' => {
-                if let Some(mb) = ed.minibuffer_mut() {
-                    mb.to_end();
-                }
-            }
-            'f' => {
-                if let Some(mb) = ed.minibuffer_mut() {
-                    mb.move_right();
-                }
-            }
-            'b' => {
-                if let Some(mb) = ed.minibuffer_mut() {
-                    mb.move_left();
-                }
-            }
-            'd' => {
-                if let Some(mb) = ed.minibuffer_mut() {
-                    mb.delete_forward();
-                }
-                update_completion(ed, false);
-            }
-            'k' => {
-                if let Some(mb) = ed.minibuffer_mut() {
-                    mb.input.truncate(mb.cursor);
-                    mb.preview.clear();
-                    mb.candidates.clear();
-                }
-                update_completion(ed, false);
-            }
-            _ => {}
-        },
-        Char(c) if !m.contains(Modifiers::ALT) && !m.contains(Modifiers::SUPER) => {
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.insert_char(c);
-            }
-            update_completion(ed, true);
-        }
         Enter => {
             let input = ed.minibuffer().map(|mb| mb.accepted()).unwrap_or_default();
+            ed.clear_pending_keys();
+            ed.push_minibuffer_history(input.clone());
             return resume(ed, ResumeValue::String(Some(input)));
         }
         Tab => {
@@ -472,40 +445,51 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
                     mb.cycle();
                 }
             }
-        }
-        Backspace => {
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.delete_backward();
-            }
-            update_completion(ed, false);
-        }
-        Delete => {
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.delete_forward();
-            }
-            update_completion(ed, false);
-        }
-        Left => {
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.move_left();
-            }
-        }
-        Right => {
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.move_right();
-            }
-        }
-        Home => {
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.to_start();
-            }
-        }
-        End => {
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.to_end();
-            }
+            return Ok(());
         }
         _ => {}
+    }
+
+    // minibuffer-local keymap, then the global keymap, then self-insert
+    ed.push_key(key);
+    let seq = ed.pending_keys().to_vec();
+    match ed.lookup_minibuffer_key(&seq) {
+        Lookup::Command(name) => {
+            ed.clear_pending_keys();
+            // The command runs against the live minibuffer input state;
+            // capture it afterwards (finish_command clears it) so the
+            // read continues with the edits applied.
+            let outcome = match ed.call_command(&name, None) {
+                Ok(o) => o,
+                Err(e) => {
+                    ed.error(e.to_string());
+                    CommandOutcome::Done
+                }
+            };
+            let after = ed.minibuffer().cloned();
+            if let Some(key) = ed.finish_command(outcome) {
+                let _ = key; // commands run from the minibuffer don't replay
+            }
+            if ed.pending().is_none() {
+                if let Some(mb) = after {
+                    ed.restore_minibuffer(mb);
+                }
+            }
+            update_completion(ed, false);
+        }
+        Lookup::Prefix => {}
+        Lookup::Unbound => {
+            let insert = ed.pending_keys().len() == 1 && key.is_self_insertable();
+            ed.clear_pending_keys();
+            if insert {
+                if let Char(c) = key.code {
+                    if let Some(mb) = ed.minibuffer_mut() {
+                        mb.insert_char(c);
+                    }
+                    update_completion(ed, true);
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -71,6 +71,44 @@ fn lua_minor_mode_keymap_and_lighter() {
 }
 
 #[test]
+fn global_bindings_work_inside_the_minibuffer() {
+    let (mut em, _) = spawn_with_config(INIT, "plain\n");
+    assert!(em.wait_for("plain", 5000));
+    // open find-file; while the minibuffer is active, a global binding
+    // (C-c t -> insert-timestamp) still runs, and the minibuffer stays
+    em.keys(b"\x18\x06"); // C-x C-f
+    assert!(em.wait_for("Find file:", 4000), "minibuffer prompt opened");
+    em.keys(b"\x03t"); // C-c t
+    assert!(
+        em.wait_for_row(0, "T1plain", 3000),
+        "global binding ran while the minibuffer was active"
+    );
+    assert!(
+        em.wait_for_row(23, "Find file:", 3000),
+        "the minibuffer is still reading"
+    );
+    em.keys(b"\x07"); // C-g aborts the minibuffer
+    assert!(em.wait_for("Quit", 3000));
+    em.quit();
+}
+
+#[test]
+fn quit_from_the_minibuffer() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.txt", "x\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("x", 5000));
+    em.keys(b"\x18\x06"); // C-x C-f
+    assert!(em.wait_for("Find file:", 4000), "minibuffer prompt opened");
+    em.keys(b"\x18\x03"); // C-x C-c from inside the minibuffer
+    assert!(
+        em.exit_status().map(|s| s.success()).unwrap_or(false),
+        "C-x C-c quit the editor from the minibuffer"
+    );
+}
+
+#[test]
 fn line_numbers_gutter() {
     let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "one\ntwo\n");

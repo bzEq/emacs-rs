@@ -160,6 +160,96 @@ fn find_file_tab_cycles_directory_entries() {
 }
 
 #[test]
+fn mx_minibuffer_editing_keys() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.txt", "x\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("x", 5000));
+    em.keys(b"\x1bx"); // M-x
+    em.type_str("abc");
+    assert!(em.wait_for_row(23, "abc", 3000), "typed input shown");
+    // C-b C-b moves the cursor before 'b'; C-d deletes 'b'
+    em.keys(b"\x02\x02");
+    em.drain();
+    em.keys(b"\x04");
+    assert!(
+        em.wait_for_row(23, "M-x ac", 3000),
+        "C-d deleted the char at point"
+    );
+    assert!(!em.screen.row_text(23).contains("abc"));
+    // typing goes in at the cursor
+    em.type_str("X");
+    assert!(em.wait_for_row(23, "aXc", 3000), "inserted at the cursor");
+    // C-f moves right, backspace deletes before the cursor
+    em.keys(b"\x06\x7f");
+    assert!(
+        em.wait_for_row(23, "aX", 3000),
+        "C-f then backspace deleted the last char"
+    );
+    // arrow keys move the cursor
+    em.keys(b"\x1b[D");
+    em.drain();
+    em.type_str("Y");
+    assert!(em.wait_for_row(23, "aYX", 3000), "Left arrow + insert");
+    em.keys(b"\x07"); // C-g aborts
+    assert!(em.wait_for("Quit", 3000));
+    em.quit();
+}
+
+#[test]
+fn mx_minibuffer_history_recall() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.txt", "x\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("x", 5000));
+    // run M-x forward-char, then M-x again and recall it with C-p
+    em.m_x("forward-char");
+    assert!(em.wait_for("L1 C1", 3000), "first M-x ran");
+    em.keys(b"\x1bx");
+    assert!(em.wait_for_row(23, "M-x ", 3000), "second M-x prompt");
+    em.keys(b"\x10"); // C-p recalls the history
+    assert!(
+        em.wait_for_row(23, "M-x forward-char", 3000),
+        "C-p recalls the previous input"
+    );
+    em.keys(b"\r");
+    assert!(em.wait_for("L2 C0", 3000), "recalled command ran again");
+    // C-n walks forward past the end: input clears
+    em.keys(b"\x1bx");
+    em.keys(b"\x10\x0e");
+    assert!(
+        em.wait_for_row(23, "M-x \u{2588}", 3000),
+        "C-n back past the end"
+    );
+    em.keys(b"\x07");
+    em.quit();
+}
+
+#[test]
+fn mx_minibuffer_handles_multibyte_input() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.txt", "x\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("x", 5000));
+    em.keys(b"\x1bx"); // M-x
+    em.type_str("中文");
+    assert!(
+        em.wait_for("中", 3000) && em.wait_for("文", 3000),
+        "multibyte input shown"
+    );
+    em.keys(b"\x7f"); // backspace removes the last char
+    assert!(em.wait_for_row(23, "中", 3000), "first char remains");
+    assert!(!em.screen.row_text(23).contains("文"), "last char deleted");
+    // the editor is still alive and the minibuffer still works
+    em.keys(b"\x07"); // C-g aborts
+    assert!(em.wait_for("Quit", 3000));
+    em.quit();
+}
+
+#[test]
 fn find_file_defaults_to_buffer_file_directory() {
     let em = Em::spawn();
     let d = em.scratch.join("proj");

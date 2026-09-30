@@ -273,7 +273,7 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     // the caret.
     let mut scroll = 0usize;
     let echo_text: String = if let Some(mb) = ed.minibuffer() {
-        let caret = if mb.cursor == mb.input.chars().count() {
+        let caret = if mb.cursor == mb.input.len() {
             "█"
         } else {
             ""
@@ -281,7 +281,7 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         // caret sits between the typed input and the completion preview
         let line = format!("{}{}{}{}", mb.prompt, mb.input, caret, mb.preview);
         let width = line_rect.width.max(1) as usize;
-        let cursor_col = mb.prompt.chars().count() + mb.cursor;
+        let cursor_col = mb.prompt.chars().count() + mb.input[..mb.cursor].chars().count();
         let preview_chars = mb.preview.chars().count();
         let keep = width.saturating_sub(1 + preview_chars);
         if cursor_col > keep {
@@ -310,9 +310,11 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
 
     // --- cursor ------------------------------------------------------------
     if let Some(mb) = ed.minibuffer() {
-        let x = (line_rect.x as usize + mb.prompt.chars().count() + mb.cursor)
-            .saturating_sub(scroll)
-            .min((line_rect.x + line_rect.width.saturating_sub(1)) as usize);
+        let x = (line_rect.x as usize
+            + mb.prompt.chars().count()
+            + mb.input[..mb.cursor].chars().count())
+        .saturating_sub(scroll)
+        .min((line_rect.x + line_rect.width.saturating_sub(1)) as usize);
         return Some((x as u16, line_rect.y));
     }
 

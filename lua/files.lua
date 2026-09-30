@@ -97,11 +97,11 @@ end
 
 M.define("find-file", function()
   local base = M.default_directory()
-  local prompt = "Find file: " .. base
-  if base:sub(-1) ~= "/" then
-    prompt = prompt .. "/"
+  local initial = base
+  if initial:sub(-1) ~= "/" then
+    initial = initial .. "/"
   end
-  local name = emacs.read_string(prompt, M.complete_file_names)
+  local name = emacs.read_string("Find file: ", M.complete_file_names, initial)
   if not name or name:match("^%s*$") == "" then return end
   local trimmed = name:match("^%s*(.-)%s*$")
   local expanded = raw.expand_tilde(trimmed)
