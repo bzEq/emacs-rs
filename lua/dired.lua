@@ -125,7 +125,7 @@ M.define("dired", function()
   if not input or input:match("^%s*$") == "" then
     dir = default
   else
-    local expanded = M.expand_tilde(input:match("^%s*(.-)%s*$"))
+    local expanded = raw.expand_tilde(input:match("^%s*(.-)%s*$"))
     if expanded:match("^/") then
       dir = expanded
     else

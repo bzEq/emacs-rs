@@ -19,15 +19,6 @@ pub enum Direction {
     Backward,
 }
 
-impl Direction {
-    pub fn reverse(self) -> Self {
-        match self {
-            Direction::Forward => Direction::Backward,
-            Direction::Backward => Direction::Forward,
-        }
-    }
-}
-
 /// An Emacs-like text buffer backed by a `ropey::Rope`.
 ///
 /// Point is stored as a char offset into the rope. All edits are O(log n).
@@ -161,10 +152,6 @@ impl Buffer {
 
     pub fn len_lines(&self) -> usize {
         self.rope.len_lines()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rope.len_chars() == 0
     }
 
     pub fn point(&self) -> usize {

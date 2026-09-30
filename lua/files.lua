@@ -24,7 +24,7 @@ local function list_matching(list_dir, out_prefix, name_prefix)
 end
 
 function M.complete_file_names(input)
-  local expanded = M.expand_tilde(input)
+  local expanded = raw.expand_tilde(input)
   local slash = expanded:match("^.*()/")
   if slash then
     return list_matching(expanded:sub(1, slash), expanded:sub(1, slash),
@@ -104,7 +104,7 @@ M.define("find-file", function()
   local name = emacs.read_string(prompt, M.complete_file_names)
   if not name or name:match("^%s*$") == "" then return end
   local trimmed = name:match("^%s*(.-)%s*$")
-  local expanded = M.expand_tilde(trimmed)
+  local expanded = raw.expand_tilde(trimmed)
   local path
   if expanded:match("^/") then
     path = expanded

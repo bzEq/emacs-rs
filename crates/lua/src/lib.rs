@@ -326,14 +326,6 @@ impl LuaHost {
             })?,
         )?;
         raw.set(
-            "delete_backward",
-            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf_mut().delete_backward()))?,
-        )?;
-        raw.set(
-            "delete_forward",
-            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf_mut().delete_forward()))?,
-        )?;
-        raw.set(
             "point",
             lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf().point()))?,
         )?;
@@ -425,13 +417,6 @@ impl LuaHost {
             "move_buffer_end",
             lua.create_function(|lua, ()| {
                 editor_ref(lua)?.buf_mut().move_to_buffer_end();
-                Ok(())
-            })?,
-        )?;
-        raw.set(
-            "move_to_line",
-            lua.create_function(|lua, n: usize| {
-                editor_ref(lua)?.buf_mut().move_to_line(n);
                 Ok(())
             })?,
         )?;
@@ -534,22 +519,8 @@ impl LuaHost {
             lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf().read_only()))?,
         )?;
         raw.set(
-            "set_read_only",
-            lua.create_function(|lua, b: bool| {
-                editor_ref(lua)?.buf_mut().set_read_only(b);
-                Ok(())
-            })?,
-        )?;
-        raw.set(
             "modified",
             lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf().modified()))?,
-        )?;
-        raw.set(
-            "set_modified",
-            lua.create_function(|lua, b: bool| {
-                editor_ref(lua)?.buf_mut().set_modified(b);
-                Ok(())
-            })?,
         )?;
         raw.set(
             "name",
@@ -727,10 +698,6 @@ impl LuaHost {
         raw.set(
             "single_window",
             lua.create_function(|lua, ()| Ok(editor_ref(lua)?.single_window()))?,
-        )?;
-        raw.set(
-            "selected_window_height",
-            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.selected_window_height()))?,
         )?;
         raw.set(
             "page_down",

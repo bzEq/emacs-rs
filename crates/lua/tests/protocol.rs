@@ -236,3 +236,16 @@ fn pending_request_survives_unknown_yield_type_check() {
         .unwrap();
     assert!(matches!(outcome, emacs_core::script::CommandOutcome::Done));
 }
+
+#[test]
+fn switch_to_buffer_finds_or_creates() {
+    let mut le = with_init();
+    // switch to a new buffer: prompts for the name, creates it
+    le.command_reading("switch-to-buffer");
+    assert!(!le.answer("notes"));
+    assert_eq!(le.ed.buf().name(), "notes", "created and selected");
+    // switching back to an existing buffer by name
+    le.command_reading("switch-to-buffer");
+    assert!(!le.answer("*scratch*"));
+    assert_eq!(le.ed.buf().name(), "*scratch*", "existing buffer selected");
+}

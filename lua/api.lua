@@ -328,10 +328,6 @@ end
 
 -- ---- filesystem helpers ----------------------------------------------------
 
-function M.expand_tilde(input)
-  return raw.expand_tilde(input)
-end
-
 local function safe_read_dir(path)
   local ok, entries = pcall(raw.read_dir, path)
   if not ok then return {} end

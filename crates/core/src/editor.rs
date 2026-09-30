@@ -36,15 +36,6 @@ pub struct WindowLayout<'a> {
     pub selected: bool,
 }
 
-/// Snapshot of a buffer's management fields, for the Lua side.
-pub struct BufferInfo<'a> {
-    pub id: usize,
-    pub name: &'a str,
-    pub path: Option<&'a Path>,
-    pub modified: bool,
-    pub read_only: bool,
-}
-
 /// One enabled minor mode's keymap, for describe-bindings.
 pub type MinorBindingSet = (String, String, Vec<(Vec<Key>, String)>);
 
@@ -163,24 +154,6 @@ impl Editor {
         }
     }
 
-    /// Switch the selected window to a buffer by name; creates it if
-    /// `create` is true.
-    pub fn switch_to_buffer(&mut self, name: &str, create: bool) -> Result<()> {
-        if let Some(idx) = self.buffers.iter().position(|b| b.name() == name) {
-            let id = self.buffers[idx].id;
-            self.set_selected_buffer(id);
-            return Ok(());
-        }
-        if !create {
-            return Err(anyhow!("no buffer named {name}"));
-        }
-        let buf = Buffer::new(name.to_string());
-        let id = buf.id;
-        self.buffers.push(buf);
-        self.set_selected_buffer(id);
-        Ok(())
-    }
-
     /// Find a buffer by file path.
     pub fn find_buffer_by_path(&self, path: &Path) -> Option<usize> {
         self.buffers.iter().position(|b| b.path() == Some(path))
@@ -223,20 +196,6 @@ impl Editor {
             let keep_id = self.buffers()[0].id;
             self.replace_buffer_in_windows(id, keep_id);
         }
-    }
-
-    /// Management fields of every buffer, for the Lua side.
-    pub fn buffer_infos(&self) -> Vec<BufferInfo<'_>> {
-        self.buffers
-            .iter()
-            .map(|b| BufferInfo {
-                id: b.id,
-                name: b.name(),
-                path: b.path(),
-                modified: b.modified(),
-                read_only: b.read_only(),
-            })
-            .collect()
     }
 
     /// Write the buffer with `id` to its file (raises on IO error; the Lua
@@ -336,14 +295,6 @@ impl Editor {
         self.windows.is_single()
     }
 
-    pub fn window_rows(&self) -> usize {
-        self.window_rows
-    }
-
-    pub fn window_cols(&self) -> usize {
-        self.window_cols
-    }
-
     pub fn set_window_size(&mut self, rows: usize, cols: usize) {
         self.window_rows = rows;
         self.window_cols = cols;
@@ -436,10 +387,6 @@ impl Editor {
     }
 
     // --- keymap / bindings -------------------------------------------------
-
-    pub fn keymap(&self) -> &Keymap {
-        &self.keymap
-    }
 
     pub fn keymap_mut(&mut self) -> &mut Keymap {
         &mut self.keymap
@@ -667,15 +614,6 @@ impl Editor {
         }
     }
 
-    /// Clear all input state (minibuffer, pending request, pending keys).
-    pub fn abort_pending(&mut self) {
-        self.pending = None;
-        self.minibuffer = None;
-        self.replay = false;
-        self.replay_key = None;
-        self.clear_pending_keys();
-    }
-
     // --- script host -------------------------------------------------------
 
     pub fn attach_script(&mut self, host: Box<dyn ScriptHost>) {
@@ -755,10 +693,6 @@ impl Editor {
         self.mode_defs.insert(def.name.clone(), def);
     }
 
-    pub fn mode_def(&self, name: &str) -> Option<&ModeDef> {
-        self.mode_defs.get(name)
-    }
-
     /// Set the major mode of the selected buffer from a registered
     /// definition, installing its local keymap and re-parsing if the
     /// language changed.
@@ -828,16 +762,6 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn buffer_switch_create() {
-        let mut ed = Editor::new(20, 80);
-        assert_eq!(ed.buf().name(), "*scratch*");
-        ed.switch_to_buffer("foo.txt", true).unwrap();
-        assert_eq!(ed.buf().name(), "foo.txt");
-        ed.switch_to_buffer("*scratch*", false).unwrap();
-        assert_eq!(ed.buf().name(), "*scratch*");
-    }
 
     #[test]
     fn esc_prefix_key() {

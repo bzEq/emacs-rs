@@ -170,14 +170,10 @@ fn quit_kills_dired_buffer() {
     let t = TmpDir::new();
     let mut le = LuaEd::new();
     open_dired(&mut le, &t.path());
-    let before = le.ed.buffer_infos().len();
+    let before = le.ed.buffers().len();
     assert!(before >= 2);
     le.run("dired-quit");
-    assert_eq!(
-        le.ed.buffer_infos().len(),
-        before - 1,
-        "dired buffer killed"
-    );
+    assert_eq!(le.ed.buffers().len(), before - 1, "dired buffer killed");
 }
 
 #[test]
