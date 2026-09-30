@@ -65,21 +65,27 @@ fn main() -> Result<()> {
     };
     let file_arg = cli.file;
 
-    // The Lua runtime is required: resolve it and check every module
-    // exists before touching the terminal, so misconfiguration is a clean
-    // fatal error instead of a broken editor.
-    let runtime_dir = match emacs_lua::find_runtime() {
-        Ok(dir) => dir,
-        Err(msg) => fatal(&msg),
-    };
-    if let Some(missing) = emacs_lua::RUNTIME_MODULES
-        .iter()
-        .find(|m| !runtime_dir.join(m).is_file())
-    {
-        fatal(&format!(
-            "required Lua runtime module is missing: {}",
-            runtime_dir.join(missing).display()
-        ));
+    // The Lua runtime is embedded in the binary; `EMACS_RS_LUA_DIR` loads
+    // it from a directory instead (developing the runtime). An explicit
+    // override is validated before touching the terminal, so a broken one
+    // is a clean fatal error instead of a broken editor.
+    let runtime_dir = std::env::var_os("EMACS_RS_LUA_DIR").map(PathBuf::from);
+    if let Some(dir) = &runtime_dir {
+        if !dir.join(emacs_lua::RUNTIME_MODULES[0]).is_file() {
+            fatal(&format!(
+                "EMACS_RS_LUA_DIR is set to {}, but the Lua runtime (api.lua) is not there",
+                dir.display()
+            ));
+        }
+        if let Some(missing) = emacs_lua::RUNTIME_MODULES
+            .iter()
+            .find(|m| !dir.join(m).is_file())
+        {
+            fatal(&format!(
+                "required Lua runtime module is missing: {}",
+                dir.join(missing).display()
+            ));
+        }
     }
 
     enable_raw_mode()?;
@@ -98,14 +104,18 @@ fn main() -> Result<()> {
 
     let mut ed = Editor::new(size.height.saturating_sub(2) as usize, size.width as usize);
 
-    // LuaJIT scripting engine: the required lua/ runtime (all default
+    // LuaJIT scripting engine: the embedded runtime (all default
     // commands, keybindings, and modes), then the user's init.lua.
     let host = match LuaHost::new() {
         Ok(host) => host,
         Err(e) => fatal(&format!("LuaJIT unavailable: {e}")),
     };
     ed.attach_script(Box::new(host));
-    if let Err(e) = ed.load_runtime(&runtime_dir) {
+    let runtime_result = match &runtime_dir {
+        Some(dir) => ed.load_runtime_dir(dir),
+        None => ed.load_runtime(),
+    };
+    if let Err(e) = runtime_result {
         fatal(&format!("failed to load the Lua runtime: {e}"));
     }
     let init = cli.init.clone().or_else(init_file);

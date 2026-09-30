@@ -1,10 +1,26 @@
-//! PTY regression tests for Lua runtime discovery: a missing or shadowed
-//! `lua/` directory must be a clean fatal error — the editor never starts
-//! with a broken runtime.
+//! PTY regression tests for the Lua runtime: it is embedded in the binary
+//! (a single `em` needs no `lua/` next to it), and `EMACS_RS_LUA_DIR` is a
+//! validated override for developing the runtime.
 
 mod common;
 
-use common::{write_file, Em};
+use common::{scratch_dir, write_file, Em};
+
+#[test]
+fn single_binary_without_lua_dir_works() {
+    // copy the binary into a bare directory with no lua/ anywhere near it
+    let scratch = scratch_dir();
+    let bin = scratch.join("em");
+    std::fs::copy(common::em_binary(), &bin).unwrap();
+    let path = write_file(&scratch, "t.txt", "hello\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_bin(scratch, &bin, &[], &[&path_s]);
+    assert!(
+        em.wait_for("hello", 5000),
+        "the embedded runtime opens files with no lua/ directory present"
+    );
+    em.quit();
+}
 
 #[test]
 fn invalid_lua_dir_env_is_fatal() {

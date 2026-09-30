@@ -14,7 +14,7 @@ pub struct LuaEd {
     pub ed: Editor,
 }
 
-/// The repo `lua/` directory (the defaults runtime).
+/// The repo `lua/` directory (the defaults runtime source of truth).
 pub fn lua_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -25,12 +25,13 @@ pub fn lua_dir() -> PathBuf {
 }
 
 impl LuaEd {
-    /// An editor with the full defaults runtime loaded.
+    /// An editor with the full defaults runtime loaded (embedded in the
+    /// binary, like the shipped `em`).
     pub fn new() -> Self {
         let mut ed = Editor::new(24, 80);
         let host = LuaHost::new().expect("LuaJIT host");
         ed.attach_script(Box::new(host));
-        ed.load_runtime(&lua_dir()).expect("defaults runtime loads");
+        ed.load_runtime().expect("defaults runtime loads");
         LuaEd { ed }
     }
 

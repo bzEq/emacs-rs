@@ -170,7 +170,7 @@ pub fn scratch_dir() -> PathBuf {
 /// Locate the `em` binary. Cargo sets `CARGO_BIN_EXE_em` when all tests run;
 /// when a single test target is selected with `--test`, it does not build
 /// the binary, so fall back to the target directory layout.
-fn em_binary() -> PathBuf {
+pub fn em_binary() -> PathBuf {
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_em") {
         return PathBuf::from(p);
     }
@@ -217,9 +217,14 @@ impl Em {
     /// Spawn `em` with an existing scratch dir and extra environment
     /// variables.
     pub fn spawn_with_scratch_env(scratch: PathBuf, envs: &[(&str, &str)], args: &[&str]) -> Self {
-        let bin = em_binary();
+        Self::spawn_bin(scratch, &em_binary(), envs, args)
+    }
+
+    /// Spawn a specific binary (e.g. a copy of `em` in a bare directory,
+    /// to prove the embedded Lua runtime needs no `lua/` next to it).
+    pub fn spawn_bin(scratch: PathBuf, bin: &Path, envs: &[(&str, &str)], args: &[&str]) -> Self {
         let (master, slave) = openpty(24, 80);
-        let mut cmd = Command::new(&bin);
+        let mut cmd = Command::new(bin);
         cmd.args(args)
             .env("XDG_CONFIG_HOME", scratch.join("cfg"))
             .env("TERM", "xterm-256color");

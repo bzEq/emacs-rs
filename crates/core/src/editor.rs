@@ -735,12 +735,21 @@ impl Editor {
         res
     }
 
-    /// Load the required runtime modules from a directory, in the order the
-    /// scripting engine defines.
-    pub fn load_runtime(&mut self, dir: &Path) -> Result<()> {
+    /// Load the required runtime modules embedded in the binary, in the
+    /// order the scripting engine defines.
+    pub fn load_runtime(&mut self) -> Result<()> {
         let mut res = Ok(());
         self.with_host(|ed, host| {
-            res = host.load_runtime(dir, ed);
+            res = host.load_runtime(ed);
+        });
+        res
+    }
+
+    /// Load the required runtime modules from a directory instead.
+    pub fn load_runtime_dir(&mut self, dir: &Path) -> Result<()> {
+        let mut res = Ok(());
+        self.with_host(|ed, host| {
+            res = host.load_runtime_dir(dir, ed);
         });
         res
     }

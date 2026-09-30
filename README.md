@@ -91,17 +91,21 @@ cargo build --release
 - `FILE` opens a file, or dired if it is a directory
 - `--init` selects the init file; the default is
   `~/.config/emacs-rs/init.lua` (respecting `XDG_CONFIG_HOME`)
-- The Lua runtime is located via `EMACS_RS_LUA_DIR`, a `lua/` directory
-  next to the executable, or `../lua` relative to it (which matches the
-  repo layout when running from `target/`)
+- The Lua runtime is embedded in the binary at compile time — a single
+  `em` executable needs no files next to it. Set `EMACS_RS_LUA_DIR` to a
+  directory of runtime modules to load them from disk instead (useful
+  while developing the runtime; a missing or broken module is a fatal
+  error)
 
 ## The Lua runtime
 
-The runtime is a fixed set of modules in `lua/`. The list and load order
-are hardcoded in `emacs-lua` (`RUNTIME_MODULES`); a missing or broken
-module is a fatal error — the editor reports it and exits instead of
-starting without a working runtime. Extra modules are not auto-loaded:
-`dofile` them from `init.lua`.
+The runtime is a fixed set of modules in `lua/` (the source of truth in
+the repo). The list and load order are hardcoded in `emacs-lua`
+(`RUNTIME_MODULES`); the sources are embedded into the binary
+(`RUNTIME_SOURCES`), so the shipped editor is one executable. A missing
+or broken module is a fatal error — the editor reports it and exits
+instead of starting without a working runtime. Extra modules are not
+auto-loaded: `dofile` them from `init.lua`.
 
 | File | Contents |
 |---|---|

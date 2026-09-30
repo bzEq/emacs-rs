@@ -48,9 +48,14 @@ pub trait ScriptHost {
     /// Load a script file (a Lua chunk).
     fn load_file(&mut self, path: &Path, editor: &mut Editor) -> Result<()>;
 
-    /// Load the required runtime modules from `dir`, in the order the
-    /// engine defines. A missing or broken module is a fatal error.
-    fn load_runtime(&mut self, dir: &Path, editor: &mut Editor) -> Result<()>;
+    /// Load the required runtime modules embedded in the binary, in the
+    /// order the engine defines. A broken module is a fatal error.
+    fn load_runtime(&mut self, editor: &mut Editor) -> Result<()>;
+
+    /// Load the required runtime modules from a directory instead (the
+    /// `EMACS_RS_LUA_DIR` override). A missing or broken module is a
+    /// fatal error.
+    fn load_runtime_dir(&mut self, dir: &Path, editor: &mut Editor) -> Result<()>;
 
     /// Invoke a command by name. `extra` carries the character for
     /// self-insert-command.
@@ -80,7 +85,11 @@ impl ScriptHost for NullHost {
         Ok(())
     }
 
-    fn load_runtime(&mut self, _dir: &Path, _editor: &mut Editor) -> Result<()> {
+    fn load_runtime(&mut self, _editor: &mut Editor) -> Result<()> {
+        Ok(())
+    }
+
+    fn load_runtime_dir(&mut self, _dir: &Path, _editor: &mut Editor) -> Result<()> {
         Ok(())
     }
 
