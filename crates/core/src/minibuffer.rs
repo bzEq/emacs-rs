@@ -1,18 +1,14 @@
-//! Minibuffer state: an input line with optional completion, plus the
-//! pending-continuation state machine used by commands that need more input.
-
-use crate::editor::Editor;
-use anyhow::Result;
-
-/// Completion: given current input, return candidate completions.
-pub type CompletionFn = fn(&Editor, &str) -> Vec<String>;
+//! Minibuffer state: an input line with optional completion display.
+//! Completion candidates are computed by the scripting host (Lua); this
+//! module only holds the input editing and preview/cycle display state.
 
 #[derive(Debug)]
 pub struct Minibuffer {
     pub prompt: String,
     pub input: String,
     pub cursor: usize,
-    pub completion: Option<CompletionFn>,
+    /// Whether completion is active (candidates come from the script host).
+    pub completion: bool,
     /// Current completion candidates (after the last Tab), for display.
     pub candidates: Vec<String>,
     pub cycle: usize,
@@ -23,7 +19,7 @@ pub struct Minibuffer {
 }
 
 impl Minibuffer {
-    pub fn new(prompt: String, completion: Option<CompletionFn>) -> Self {
+    pub fn new(prompt: String, completion: bool) -> Self {
         Minibuffer {
             prompt,
             input: String::new(),
@@ -46,13 +42,6 @@ impl Minibuffer {
             self.cursor += 1;
             self.preview.clear();
         }
-        self.candidates.clear();
-    }
-
-    pub fn insert_str(&mut self, s: &str) {
-        self.input.insert_str(self.cursor, s);
-        self.cursor += s.chars().count();
-        self.preview.clear();
         self.candidates.clear();
     }
 
@@ -163,39 +152,6 @@ fn common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
     &a[..len]
 }
 
-/// Completion over command names (for M-x).
-pub fn complete_command_names(ed: &Editor, input: &str) -> Vec<String> {
-    ed.commands().complete(input)
-}
-
-/// Completion over buffer names (for C-x b, C-x k).
-pub fn complete_buffer_names(ed: &Editor, input: &str) -> Vec<String> {
-    let mut names: Vec<String> = ed
-        .buffers()
-        .iter()
-        .map(|b| b.name().to_string())
-        .filter(|n| n.starts_with(input))
-        .collect();
-    names.sort();
-    names
-}
-
-/// Deferred continuation after minibuffer input is accepted.
-pub type StringContinuation = Box<dyn FnOnce(&mut Editor, String) -> Result<()>>;
-pub type BoolContinuation = Box<dyn FnOnce(&mut Editor, bool) -> Result<()>>;
-
-/// What the editor is waiting for, outside the normal command loop.
-pub enum Pending {
-    /// Reading a string from the minibuffer; `cont` runs on RET.
-    ReadString { cont: StringContinuation },
-    YesNo {
-        prompt: String,
-        cont: BoolContinuation,
-    },
-    /// describe-key: reading a key sequence; resolves when complete.
-    ReadKey { keys: Vec<crate::key::Key> },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +165,7 @@ mod tests {
 
     #[test]
     fn minibuffer_editing() {
-        let mut mb = Minibuffer::new("M-x ".into(), None);
+        let mut mb = Minibuffer::new("M-x ".into(), false);
         mb.insert_char('a');
         mb.insert_char('b');
         mb.move_left();
@@ -222,7 +178,7 @@ mod tests {
 
     #[test]
     fn completion_preview_then_cycles() {
-        let mut mb = Minibuffer::new("M-x ".into(), None);
+        let mut mb = Minibuffer::new("M-x ".into(), true);
         mb.insert_char('d');
         mb.complete_with(vec!["delete-char".into(), "describe-key".into()], true);
         assert_eq!(mb.input, "d", "input untouched");
@@ -242,7 +198,7 @@ mod tests {
 
     #[test]
     fn single_candidate_previews_full_name() {
-        let mut mb = Minibuffer::new("M-x ".into(), None);
+        let mut mb = Minibuffer::new("M-x ".into(), true);
         mb.insert_char('l');
         mb.insert_char('u');
         mb.complete_with(vec!["lua-mode".into()], true);
@@ -254,7 +210,7 @@ mod tests {
 
     #[test]
     fn typing_consumes_matching_preview() {
-        let mut mb = Minibuffer::new("M-x ".into(), None);
+        let mut mb = Minibuffer::new("M-x ".into(), true);
         mb.insert_char('t');
         mb.complete_with(vec!["txt-mode".into()], true);
         assert_eq!(mb.preview, "xt-mode");
@@ -268,7 +224,7 @@ mod tests {
 
     #[test]
     fn non_matching_char_drops_preview() {
-        let mut mb = Minibuffer::new("M-x ".into(), None);
+        let mut mb = Minibuffer::new("M-x ".into(), true);
         mb.insert_char('t');
         mb.complete_with(vec!["txt-mode".into()], true);
         mb.insert_char('z');
@@ -278,7 +234,7 @@ mod tests {
 
     #[test]
     fn cycle_resets_when_candidates_change() {
-        let mut mb = Minibuffer::new("M-x ".into(), None);
+        let mut mb = Minibuffer::new("M-x ".into(), true);
         mb.complete_with(vec!["a-command".into(), "b-command".into()], true);
         assert!(mb.cycle());
         assert_eq!(mb.input, "a-command");
@@ -293,7 +249,7 @@ mod tests {
 
     #[test]
     fn no_fill_after_deletion() {
-        let mut mb = Minibuffer::new("M-x ".into(), None);
+        let mut mb = Minibuffer::new("M-x ".into(), true);
         // user typed "describe" and the preview showed the LCP suffix
         for c in "describe".chars() {
             mb.insert_char(c);

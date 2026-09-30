@@ -1,8 +1,43 @@
 # emacs-rs
 
-An Emacs-like text editor written in Rust: rope-backed buffers for
-large-file performance, Emacs keybindings and command system, and LuaJIT
-as the extension language.
+An Emacs-like text editor with a minimal Rust core and LuaJIT for
+everything else — the way Emacs splits a small C core from Emacs Lisp.
+
+## Architecture
+
+```
+Rust core (crates/)               Lua runtime (lua/, loaded at startup)
+------------------------------    --------------------------------------
+rope buffer primitives            all commands (motion, editing, ...)
+window tree / scrolling           undo & kill ring
+key parsing / keymap lookup       prefix arguments (C-u, C-3, M--)
+rendering (ratatui)               isearch (C-s / C-r)
+terminal event loop               dired
+tree-sitter highlighting          major / minor modes & keybindings
+minibuffer input editing          completion functions
+filesystem & buffer primitives    find-file, save, buffers, quit
+                                  M-x, describe-key/bindings
+```
+
+Commands are Lua functions driven as **coroutines**: a command that needs
+input (minibuffer string, yes/no, a raw key) suspends with
+`coroutine.yield` and the Rust event loop resumes it when the input
+arrives, so Lua commands use plain synchronous reads:
+
+```lua
+emacs.define_command("ask", function()
+  local name = emacs.read_string("Name: ", nil)
+  local ok = emacs.read_yes_no("Continue? (y/n)")
+  if name and ok then emacs.insert("hi " .. name) end
+end)
+```
+
+The Rust binary only knows how to: read keys, look them up in keymaps,
+render the state, and shuttle input between the terminal and suspended
+Lua coroutines. All policy — what commands exist, what keys run them,
+what modes do, how undo and the kill ring behave — lives in the `lua/`
+directory, so users can redefine any part of the editor from their
+`init.lua`.
 
 ## Features
 
@@ -16,7 +51,7 @@ as the extension language.
   - Incremental search: `C-s` / `C-r`, case-insensitive, wraps around,
     `C-g` aborts
   - Undo (with boundaries), kill ring (consecutive kills accumulate),
-    prefix arguments (`C-u`/`C-3`)
+    prefix arguments (`C-u`/`C-3`) — all implemented in Lua
   - CRLF files follow Emacs semantics (`\r\n` acts as a single newline)
 - **Window system**: `C-x 2/3` splits, `C-x 0/1` deletes, `C-x o` cycles;
   each window keeps its own point and scroll position
@@ -24,19 +59,16 @@ as the extension language.
   (D), rename (R), copy (C), mkdir (+), subdirectory navigation;
   `find-file` or a directory command-line argument opens dired
   automatically
-- **Syntax highlighting**: tree-sitter (Rust and Lua built in), colored by
-  node type, with parse size caps and a re-parse cooldown so large files
-  stay fast
+- **Syntax highlighting**: tree-sitter (Rust, Lua, C++ built in), colored
+  by node type, with parse size caps and a re-parse cooldown so large
+  files stay fast
 - **Auto-indentation**: `RET` indents smartly (`{` indents, `}`/`end`
   outdents), `TAB` re-indents the current line, `C-j` runs
   `electric-newline-and-maybe-indent` (no indent inside comments/strings),
-  Backspace at line start deletes one indent unit
+  Backspace at line start deletes one indent unit — all in Lua
 - **Major / minor modes**: major mode chosen by file extension; minor
   modes like `line-numbers` toggle per buffer; modes can carry local
   keymaps (lighters shown in the modeline)
-- **LuaJIT extensions**: `mlua` with vendored LuaJIT (no system
-  dependency); `init.lua` can define commands, bind keys, define
-  major/minor modes, and register hooks
 
 ## Build and run
 
@@ -51,6 +83,30 @@ cargo build --release
 - `FILE` opens a file, or dired if it is a directory
 - `--init` selects the init file; the default is
   `~/.config/emacs-rs/init.lua` (respecting `XDG_CONFIG_HOME`)
+- The Lua runtime is located via `EMACS_RS_LUA_DIR`, a `lua/` directory
+  next to the executable, or `../lua` relative to it (which matches the
+  repo layout when running from `target/`)
+
+## The Lua runtime
+
+`lua/` loads in lexical order before the user's init.lua:
+
+| File | Contents |
+|---|---|
+| `00-api.lua` | state, undo, kill ring, prefix args, command machinery, the `emacs` API |
+| `10-motion.lua` | motion commands |
+| `20-editing.lua` | editing commands, auto-indentation |
+| `30-search.lua` | incremental search |
+| `40-windows.lua` | window commands |
+| `50-files.lua` | find/save/write/switch/kill-buffer, file completion |
+| `60-modes.lua` | built-in major and minor modes |
+| `70-dired.lua` | the directory editor |
+| `80-help.lua` | `M-x`, describe-key, describe-bindings |
+| `90-bindings.lua` | the default global keymap |
+
+The `emacs` module is the user-facing API; the `raw` module underneath it
+exposes the Rust primitives (rope editing, motion, search, buffers,
+windows, keymaps, modes, filesystem) that the defaults build on.
 
 ## Configuration (init.lua)
 
@@ -62,6 +118,11 @@ See the fully commented example in
 emacs.define_command("my-cmd", function(prefix) emacs.insert("x") end)
 emacs.bind("C-c x", "my-cmd")            -- global binding (overrides defaults)
 emacs.local_set_key("C-c y", "my-cmd")   -- binding local to the current buffer
+
+-- synchronous reads (coroutine-based)
+local name = emacs.read_string("Name: ", nil)
+local yes  = emacs.read_yes_no("Sure? (y/n)")
+local key  = emacs.read_key()            -- "C-x", "RET", "a", ...
 
 -- major / minor modes
 emacs.define_major_mode("txt-mode", {
@@ -85,6 +146,9 @@ emacs.add_hook("before_save", function() emacs.message("saving...") end)
 Key syntax: `C-x C-f`, `M-f`, `C-M-a`, `RET`, `TAB`, `DEL`, `SPC`,
 `<left>`, `<f1>`.
 
+Note: this LuaJIT build does not support the `|` alternation operator in
+string patterns; chain several `:match` calls instead.
+
 ## Common keybindings
 
 | Key | Command | Key | Command |
@@ -98,28 +162,19 @@ Key syntax: `C-x C-f`, `M-f`, `C-M-a`, `RET`, `TAB`, `DEL`, `SPC`,
 | `C-g` | cancel | `M-x` | execute command (with completion) |
 | `C-u/C-3/M--` | prefix argument | `C-h k/b` | describe key/bindings |
 
-## Architecture
-
-```
-crates/
-  core/   # pure logic: rope buffer, undo, kill ring, keymap, command
-          # system, window tree, isearch, dired, indentation,
-          # tree-sitter highlighting
-  lua/    # mlua + LuaJIT: the emacs module (commands/keybindings/modes/hooks)
-  ui/     # ratatui rendering: window tree, modeline, echo area,
-          # completion preview
-  app/    # the em binary: event loop (read -> execute -> render), CLI
-```
-
 ## Testing
 
 ```sh
 cargo test
 ```
 
-- `crates/core` unit tests: buffer semantics (goal column, CRLF), undo,
-  kill ring, keymaps, window tree, isearch, indentation, syntax
-  highlighting, dired
+- `crates/core` unit tests: rope buffer semantics (goal column, CRLF),
+  key parsing, keymaps, window tree, minibuffer editing, search
+  primitives, syntax highlighting
+- `crates/lua/tests` unit tests drive the real Lua runtime against an
+  in-memory editor: commands, undo, kill ring, prefix arguments, isearch
+  (via coroutine resumes), indentation, dired, and the read-string /
+  read-key / yes-no protocols
 - `crates/app/tests` PTY integration tests: spawn the real `em` binary in
   a pseudo-terminal, send keystrokes, reconstruct the screen, and assert
   (editing, windows, search, highlighting, modes, completion, dired, CLI)

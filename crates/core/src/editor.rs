@@ -1,21 +1,19 @@
-//! The Editor: all global editor state — buffers, windows, keymap, commands,
-//! kill ring, echo area, minibuffer, prefix argument, and the optional
-//! scripting host.
+//! The Editor: the minimal Rust core — buffers, windows, keymaps, echo
+//! area, minibuffer input state, and the interface to the scripting host.
+//! Commands, modes' behavior, undo, the kill ring, isearch, and dired all
+//! live in Lua on top of these primitives.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::buffer::Buffer;
-use crate::command::CommandRegistry;
-use crate::isearch::ISearch;
 use crate::key::Key;
 use crate::keymap::{Keymap, Lookup};
-use crate::kill_ring::KillRing;
-use crate::minibuffer::{BoolContinuation, CompletionFn, Minibuffer, Pending, StringContinuation};
+use crate::minibuffer::Minibuffer;
 use crate::minor::MinorModeDef;
 use crate::mode::ModeDef;
-use crate::script::{NullHost, ScriptHost};
+use crate::script::{CommandOutcome, NullHost, PendingRequest, ResumeValue, ScriptHost};
 use crate::view::View;
 use crate::window::{Rect as WinRect, Split, WindowTree};
 
@@ -30,35 +28,6 @@ pub enum KeymapSource {
     Minor(usize),
 }
 
-/// Numeric prefix argument state (C-u, C-3, M--, ...).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PrefixArg {
-    pub digits: Option<u64>,
-    pub negative: bool,
-    pub universal: u32,
-}
-
-impl PrefixArg {
-    pub fn is_active(&self) -> bool {
-        self.digits.is_some() || self.negative || self.universal > 0
-    }
-
-    /// The final numeric value, Emacs-style: digits win; `C-u` is 4^n; bare
-    /// `C--` is -1; no argument is 1.
-    pub fn value(&self) -> i64 {
-        if let Some(d) = self.digits {
-            return if self.negative { -(d as i64) } else { d as i64 };
-        }
-        if self.negative {
-            return -1;
-        }
-        if self.universal > 0 {
-            return 4i64.pow(self.universal);
-        }
-        1
-    }
-}
-
 /// One window's rendering info, handed to the UI.
 pub struct WindowLayout<'a> {
     pub buf: &'a Buffer,
@@ -67,88 +36,74 @@ pub struct WindowLayout<'a> {
     pub selected: bool,
 }
 
+/// Snapshot of a buffer's management fields, for the Lua side.
+pub struct BufferInfo<'a> {
+    pub id: usize,
+    pub name: &'a str,
+    pub path: Option<&'a Path>,
+    pub modified: bool,
+    pub read_only: bool,
+}
+
+/// One enabled minor mode's keymap, for describe-bindings.
+pub type MinorBindingSet = (String, String, Vec<(Vec<Key>, String)>);
+
 pub struct Editor {
     buffers: Vec<Buffer>,
     windows: WindowTree,
     keymap: Keymap,
-    commands: CommandRegistry,
-    kill_ring: KillRing,
-    /// (pos, len) of the last yank, for yank-pop.
-    last_yank: Option<(usize, usize)>,
     /// Message in the echo area, if any.
     echo: Option<String>,
     /// True if `echo` is an error.
     echo_error: bool,
     minibuffer: Option<Minibuffer>,
-    pending: Option<Pending>,
+    /// What a suspended command coroutine is waiting for.
+    pending: Option<PendingRequest>,
     /// Keys of the key sequence in progress (for prefix resolution).
     pending_keys: Vec<Key>,
     /// Esc acts as a Meta prefix (ESC x == M-x).
     esc_prefix: bool,
-    prefix_arg: PrefixArg,
-    this_command: String,
-    last_command: String,
-    /// Char passed to self-insert-command.
-    self_insert_char: Option<char>,
     quit: bool,
     /// Rows/cols of the buffer area (terminal size minus modeline + echo).
     window_rows: usize,
     window_cols: usize,
-    /// Active incremental search state.
-    isearch: Option<ISearch>,
     script: Option<Box<dyn ScriptHost>>,
-    /// Major mode definitions by name (built-in + Lua).
+    /// Major mode definitions by name (Lua-defined).
     mode_defs: std::collections::HashMap<String, ModeDef>,
-    /// Minor mode definitions by name (built-in + Lua).
+    /// Minor mode definitions by name (Lua-defined).
     minor_defs: std::collections::HashMap<String, MinorModeDef>,
     /// Which keymap the key sequence in progress belongs to.
     pending_keymap: Option<KeymapSource>,
+    /// The most recent key delivered to a `read-key` coroutine, for replay.
+    replay_key: Option<Key>,
+    /// Set by the Lua isearch layer to replay `replay_key` after exit.
+    replay: bool,
 }
 
 impl Editor {
     pub fn new(window_rows: usize, window_cols: usize) -> Self {
         let scratch = Buffer::new("*scratch*");
         let scratch_id = scratch.id;
-        let mut mode_defs = std::collections::HashMap::new();
-        for def in [
-            crate::mode::fundamental_def(),
-            crate::mode::rust_def(),
-            crate::mode::lua_def(),
-            crate::mode::cpp_def(),
-        ] {
-            mode_defs.insert(def.name.clone(), def);
-        }
-        let mut minor_defs = std::collections::HashMap::new();
-        let ln = crate::minor::line_numbers_def();
-        minor_defs.insert(ln.name.clone(), ln);
-        let mut ed = Editor {
+        Editor {
             buffers: vec![scratch],
             windows: WindowTree::new(scratch_id),
             keymap: Keymap::new(),
-            commands: CommandRegistry::new(),
-            kill_ring: KillRing::new(),
-            last_yank: None,
             echo: None,
             echo_error: false,
             minibuffer: None,
             pending: None,
             pending_keys: Vec::new(),
             esc_prefix: false,
-            prefix_arg: PrefixArg::default(),
-            this_command: String::new(),
-            last_command: String::new(),
-            self_insert_char: None,
             quit: false,
             window_rows,
             window_cols,
-            isearch: None,
             script: None,
-            mode_defs,
-            minor_defs,
+            mode_defs: std::collections::HashMap::new(),
+            minor_defs: std::collections::HashMap::new(),
             pending_keymap: None,
-        };
-        crate::commands::register_defaults(&mut ed);
-        ed
+            replay_key: None,
+            replay: false,
+        }
     }
 
     // --- buffers -----------------------------------------------------------
@@ -217,7 +172,7 @@ impl Editor {
             return Ok(());
         }
         if !create {
-            return Err(anyhow::anyhow!("no buffer named {name}"));
+            return Err(anyhow!("no buffer named {name}"));
         }
         let buf = Buffer::new(name.to_string());
         let id = buf.id;
@@ -236,6 +191,14 @@ impl Editor {
         self.buffers.len() - 1
     }
 
+    /// Create a new, empty buffer and return its id.
+    pub fn new_buffer(&mut self, name: &str) -> usize {
+        let buf = Buffer::new(name.to_string());
+        let id = buf.id;
+        self.buffers.push(buf);
+        id
+    }
+
     /// Remove the buffer at `idx` (caller handles windows).
     pub fn remove_buffer(&mut self, idx: usize) {
         self.buffers.remove(idx);
@@ -244,6 +207,57 @@ impl Editor {
     /// Point all windows showing `old_id` at `new_id` (buffer killed).
     pub fn replace_buffer_in_windows(&mut self, old_id: usize, new_id: usize) {
         self.windows.replace_buffer(old_id, new_id);
+    }
+
+    /// Kill the buffer with id `id`, pointing any windows that displayed it
+    /// at another buffer.
+    pub fn kill_buffer_at(&mut self, id: usize) {
+        let idx = self.buffer_index(id);
+        self.remove_buffer(idx);
+        if self.buffers().is_empty() {
+            let scratch = Buffer::new("*scratch*");
+            let sid = scratch.id;
+            self.add_buffer(scratch);
+            self.replace_buffer_in_windows(id, sid);
+        } else {
+            let keep_id = self.buffers()[0].id;
+            self.replace_buffer_in_windows(id, keep_id);
+        }
+    }
+
+    /// Management fields of every buffer, for the Lua side.
+    pub fn buffer_infos(&self) -> Vec<BufferInfo<'_>> {
+        self.buffers
+            .iter()
+            .map(|b| BufferInfo {
+                id: b.id,
+                name: b.name(),
+                path: b.path(),
+                modified: b.modified(),
+                read_only: b.read_only(),
+            })
+            .collect()
+    }
+
+    /// Write the buffer with `id` to its file (raises on IO error; the Lua
+    /// layer handles modified flags and save hooks).
+    pub fn save_buffer_to_disk(&mut self, id: usize) -> Result<()> {
+        let idx = self.buffer_index(id);
+        self.buffers()[idx].save().map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Replace the current buffer's content with `text` (used by dired
+    /// listings and the *Help* buffer), leaving point at the start and the
+    /// buffer unmodified.
+    pub fn replace_buffer_content(&mut self, text: &str) {
+        let len = self.buf().rope().len_chars();
+        if len > 0 {
+            let _ = self.buf_mut().delete_range(0, len);
+        }
+        self.buf_mut().set_point(0);
+        self.buf_mut().insert(text);
+        self.buf_mut().set_point(0);
+        self.buf_mut().set_modified(false);
     }
 
     // --- windows -----------------------------------------------------------
@@ -408,7 +422,20 @@ impl Editor {
         }
     }
 
-    // --- keymap / commands -------------------------------------------------
+    // --- search ------------------------------------------------------------
+
+    /// Case-insensitive match of `query` at or after `from`, in char
+    /// offsets (used by the Lua isearch implementation).
+    pub fn search_forward(&self, query: &str, from: usize) -> Option<usize> {
+        crate::search::find_forward(self.buf().rope(), query, from)
+    }
+
+    /// Case-insensitive match of `query` strictly before `from`.
+    pub fn search_backward(&self, query: &str, from: usize) -> Option<usize> {
+        crate::search::find_backward(self.buf().rope(), query, from)
+    }
+
+    // --- keymap / bindings -------------------------------------------------
 
     pub fn keymap(&self) -> &Keymap {
         &self.keymap
@@ -484,42 +511,37 @@ impl Editor {
         }
     }
 
-    pub fn commands(&self) -> &CommandRegistry {
-        &self.commands
+    /// All global bindings, flattened and sorted, for describe-bindings.
+    pub fn global_bindings(&self) -> Vec<(Vec<Key>, String)> {
+        self.keymap.flatten()
     }
 
-    pub fn commands_mut(&mut self) -> &mut CommandRegistry {
-        &mut self.commands
+    /// The selected buffer's local keymap bindings.
+    pub fn local_bindings(&self) -> Vec<(Vec<Key>, String)> {
+        self.buf()
+            .local_keymap()
+            .map(Keymap::flatten)
+            .unwrap_or_default()
     }
 
-    /// Invoke a command by name: undo bookkeeping, last-command tracking,
-    /// prefix-arg consumption, then dispatch to Rust or the script host.
-    pub fn invoke_command(&mut self, name: &str) -> Result<()> {
-        let cmd = match self.commands.get(name) {
-            Some(c) => c.clone(),
-            None => return Err(anyhow::anyhow!("{name} is undefined")),
-        };
-        if self.last_command != name {
-            self.buf_mut().undo_boundary();
+    /// (name, lighter, bindings) of every enabled minor mode with a keymap.
+    pub fn minor_binding_sets(&self) -> Vec<MinorBindingSet> {
+        let idx = self.selected_buffer_index();
+        let mut out = Vec::new();
+        for name in self.buffers[idx].enabled_minor().to_vec() {
+            if let Some(def) = self.minor_defs.get(&name) {
+                if let Some(km) = &def.keymap {
+                    out.push((name.clone(), def.lighter.clone(), km.flatten()));
+                }
+            }
         }
-        self.last_command = std::mem::take(&mut self.this_command);
-        self.this_command = name.to_string();
-        let result = match cmd.lua_id {
-            Some(id) => self.with_host(|ed, host| host.call_command(id, ed)),
-            None => cmd.rust_fn.expect("command has no implementation")(self),
-        };
-        // last-command is the command that just ran (Emacs updates it after
-        // execution; during execution it still refers to the previous one).
-        self.last_command = name.to_string();
-        // The prefix arg applies to the next command only; the commands that
-        // set it keep it for that next command.
-        let is_prefix_setter = name == "universal-argument"
-            || name == "negative-argument"
-            || name.starts_with("digit-argument-");
-        if !is_prefix_setter {
-            self.prefix_arg = PrefixArg::default();
-        }
-        result
+        out
+    }
+
+    /// Add a binding to the selected buffer's local keymap, creating it if
+    /// needed.
+    pub fn local_set_key(&mut self, idx: usize, seq: &[Key], cmd: &str) {
+        self.buffers[idx].local_keymap_mut().bind_sequence(seq, cmd);
     }
 
     // --- key sequence state ------------------------------------------------
@@ -544,30 +566,6 @@ impl Editor {
 
     pub fn set_esc_prefix(&mut self, v: bool) {
         self.esc_prefix = v;
-    }
-
-    pub fn self_insert_char(&self) -> Option<char> {
-        self.self_insert_char
-    }
-
-    pub fn set_self_insert_char(&mut self, c: Option<char>) {
-        self.self_insert_char = c;
-    }
-
-    pub fn prefix_arg(&self) -> PrefixArg {
-        self.prefix_arg
-    }
-
-    pub fn set_prefix_arg(&mut self, arg: PrefixArg) {
-        self.prefix_arg = arg;
-    }
-
-    pub fn this_command(&self) -> &str {
-        &self.this_command
-    }
-
-    pub fn last_command(&self) -> &str {
-        &self.last_command
     }
 
     pub fn quit(&self) -> bool {
@@ -614,106 +612,68 @@ impl Editor {
         self.minibuffer.as_mut()
     }
 
-    pub fn pending(&self) -> Option<&Pending> {
+    pub fn pending(&self) -> Option<&PendingRequest> {
         self.pending.as_ref()
     }
 
-    pub fn pending_mut(&mut self) -> Option<&mut Pending> {
-        self.pending.as_mut()
+    /// True if point (in the current buffer) is inside a comment or string
+    /// node (used by electric-newline-and-maybe-indent in Lua).
+    pub fn point_in_comment_or_string(&self) -> bool {
+        let buf = self.buf();
+        let Some(s) = buf.syntax() else {
+            return false;
+        };
+        crate::syntax::point_in_comment_or_string(s, buf.rope(), buf.point())
     }
 
-    pub fn set_pending(&mut self, pending: Option<Pending>) {
-        self.pending = pending;
+    /// Record the key that was delivered to a `read-key` request, so a
+    /// command can ask to replay it after finishing.
+    pub fn set_read_key(&mut self, key: Key) {
+        self.replay_key = Some(key);
     }
 
-    pub fn take_pending(&mut self) -> Option<Pending> {
-        self.pending.take()
+    /// Called by the Lua layer: replay the pending key after the command
+    /// coroutine finishes.
+    pub fn set_replay(&mut self) {
+        self.replay = true;
     }
 
-    /// Ask the minibuffer for a string; `cont` runs with the answer.
-    pub fn read_string(
-        &mut self,
-        prompt: impl Into<String>,
-        completion: Option<CompletionFn>,
-        cont: StringContinuation,
-    ) {
-        self.minibuffer = Some(Minibuffer::new(prompt.into(), completion));
-        self.pending = Some(Pending::ReadString { cont });
-    }
-
-    pub fn read_yes_no(&mut self, prompt: impl Into<String>, cont: BoolContinuation) {
-        self.pending = Some(Pending::YesNo {
-            prompt: prompt.into(),
-            cont,
-        });
-    }
-
-    /// Minibuffer accepted (RET): run the continuation.
-    pub fn finish_read_string(&mut self, input: String) -> Result<()> {
-        let pending = self.pending.take();
+    /// Apply a command outcome: clear the minibuffer, store the pending
+    /// request (installing a fresh minibuffer for read-string requests).
+    /// Returns a key to replay through the normal dispatch, if requested.
+    pub fn finish_command(&mut self, outcome: CommandOutcome) -> Option<Key> {
         self.minibuffer = None;
-        match pending {
-            Some(Pending::ReadString { cont, .. }) => cont(self, input),
-            _ => Ok(()),
+        match outcome {
+            CommandOutcome::Done => {
+                self.pending = None;
+                let key = if self.replay {
+                    self.replay_key.take()
+                } else {
+                    None
+                };
+                self.replay = false;
+                self.replay_key = None;
+                key
+            }
+            CommandOutcome::Pending(PendingRequest::ReadString { prompt, completion }) => {
+                self.minibuffer = Some(Minibuffer::new(prompt.clone(), completion));
+                self.pending = Some(PendingRequest::ReadString { prompt, completion });
+                None
+            }
+            CommandOutcome::Pending(p) => {
+                self.pending = Some(p);
+                None
+            }
         }
     }
 
-    /// Abort any minibuffer/pending state (C-g).
+    /// Clear all input state (minibuffer, pending request, pending keys).
     pub fn abort_pending(&mut self) {
         self.pending = None;
         self.minibuffer = None;
+        self.replay = false;
+        self.replay_key = None;
         self.clear_pending_keys();
-    }
-
-    // --- isearch -----------------------------------------------------------
-
-    pub fn isearch(&self) -> Option<&ISearch> {
-        self.isearch.as_ref()
-    }
-
-    pub fn isearch_active(&self) -> bool {
-        self.isearch.is_some()
-    }
-
-    pub fn set_isearch(&mut self, is: Option<ISearch>) {
-        self.isearch = is;
-    }
-
-    pub fn take_isearch(&mut self) -> Option<ISearch> {
-        self.isearch.take()
-    }
-
-    pub fn start_isearch(&mut self, forward: bool) {
-        let point = self.buf().point();
-        self.isearch = Some(ISearch::new(forward, point));
-    }
-
-    // --- kill ring ---------------------------------------------------------
-
-    pub fn kill_ring(&self) -> &KillRing {
-        &self.kill_ring
-    }
-
-    pub fn kill_ring_mut(&mut self) -> &mut KillRing {
-        &mut self.kill_ring
-    }
-
-    /// Kill `text`; appends to the current entry if the last command was a
-    /// kill command (Emacs accumulates consecutive kills).
-    pub fn kill(&mut self, text: String) {
-        let append = matches!(
-            self.last_command(),
-            "kill-line" | "kill-region" | "kill-word" | "backward-kill-word"
-        );
-        self.kill_ring.kill(text, append);
-    }
-
-    pub fn last_yank(&self) -> Option<(usize, usize)> {
-        self.last_yank
-    }
-
-    pub fn set_last_yank(&mut self, y: Option<(usize, usize)>) {
-        self.last_yank = y;
     }
 
     // --- script host -------------------------------------------------------
@@ -734,16 +694,7 @@ impl Editor {
         res
     }
 
-    /// Run a hook (e.g. "before_save") if a script host is attached.
-    pub fn run_hook(&mut self, name: &str) -> Result<()> {
-        let mut res = Ok(());
-        self.with_host(|ed, host| {
-            res = host.call_hook(name, ed);
-        });
-        res
-    }
-
-    /// Load a script file (init.lua).
+    /// Load a script file (a defaults module or the user init.lua).
     pub fn load_script(&mut self, path: &Path) -> Result<()> {
         let mut res = Ok(());
         self.with_host(|ed, host| {
@@ -752,9 +703,49 @@ impl Editor {
         res
     }
 
-    /// Convenience: path of the selected window's buffer.
-    pub fn current_buf_path(&self) -> Option<PathBuf> {
-        self.buf().path().map(|p| p.to_path_buf())
+    /// Load every `*.lua` file in a directory, in lexical order.
+    pub fn load_script_dir(&mut self, dir: &Path) -> Result<()> {
+        let mut res = Ok(());
+        self.with_host(|ed, host| {
+            res = host.load_dir(dir, ed);
+        });
+        res
+    }
+
+    /// Invoke a command by name through the script host.
+    pub fn call_command(&mut self, name: &str, extra: Option<char>) -> Result<CommandOutcome> {
+        let mut out = Err(anyhow!("no script host attached"));
+        self.with_host(|ed, host| {
+            out = host.call_command(name, extra, ed);
+        });
+        out
+    }
+
+    /// Resume a suspended command coroutine.
+    pub fn resume_pending(&mut self, value: ResumeValue) -> Result<CommandOutcome> {
+        let mut out = Err(anyhow!("no script host attached"));
+        self.with_host(|ed, host| {
+            out = host.resume_pending(value, ed);
+        });
+        out
+    }
+
+    /// Recompute minibuffer completion candidates through the script host.
+    pub fn update_completion(&mut self, input: &str) -> Result<Vec<String>> {
+        let mut out = Ok(Vec::new());
+        self.with_host(|ed, host| {
+            out = host.update_completion(input, ed);
+        });
+        out
+    }
+
+    /// Run the Lua startup function with the command-line file argument.
+    pub fn run_startup(&mut self, path: Option<&str>) -> Result<()> {
+        let mut res = Ok(());
+        self.with_host(|ed, host| {
+            res = host.run_startup(path, ed);
+        });
+        res
     }
 
     // --- major / minor modes ----------------------------------------------
@@ -767,11 +758,7 @@ impl Editor {
         self.mode_defs.get(name)
     }
 
-    pub fn mode_defs(&self) -> impl Iterator<Item = &ModeDef> {
-        self.mode_defs.values()
-    }
-
-    /// Set the major mode of the buffer at `idx` from a registered
+    /// Set the major mode of the selected buffer from a registered
     /// definition, installing its local keymap and re-parsing if the
     /// language changed.
     pub fn set_buffer_mode_by_name(&mut self, idx: usize, name: &str) -> Result<()> {
@@ -779,7 +766,7 @@ impl Editor {
             .mode_defs
             .get(name)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("no major mode named {name}"))?;
+            .ok_or_else(|| anyhow!("no major mode named {name}"))?;
         let buf = &mut self.buffers[idx];
         buf.set_mode(def.to_mode());
         let local = def.keymap.filter(|k| !k.is_empty());
@@ -803,15 +790,11 @@ impl Editor {
         self.minor_defs.get(name)
     }
 
-    pub fn minor_defs(&self) -> impl Iterator<Item = &MinorModeDef> {
-        self.minor_defs.values()
-    }
-
     /// Toggle a minor mode on the selected window's buffer; returns the new
     /// state (true = enabled).
     pub fn toggle_minor_mode(&mut self, idx: usize, name: &str) -> Result<bool> {
         if !self.minor_defs.contains_key(name) {
-            return Err(anyhow::anyhow!("no minor mode named {name}"));
+            return Err(anyhow!("no minor mode named {name}"));
         }
         let buf = &mut self.buffers[idx];
         if buf.minor_mode_enabled(name) {
@@ -825,7 +808,7 @@ impl Editor {
 
     pub fn set_minor_mode(&mut self, idx: usize, name: &str, enable: bool) -> Result<bool> {
         if !self.minor_defs.contains_key(name) {
-            return Err(anyhow::anyhow!("no minor mode named {name}"));
+            return Err(anyhow!("no minor mode named {name}"));
         }
         let buf = &mut self.buffers[idx];
         if enable {
@@ -839,63 +822,11 @@ impl Editor {
     pub fn minor_mode_enabled(&self, idx: usize, name: &str) -> bool {
         self.buffers[idx].minor_mode_enabled(name)
     }
-
-    /// Add a binding to the selected buffer's local keymap, creating it if
-    /// needed.
-    pub fn local_set_key(&mut self, idx: usize, seq: &[Key], cmd: &str) {
-        self.buffers[idx].local_keymap_mut().bind_sequence(seq, cmd);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prefix_arg_values() {
-        assert_eq!(PrefixArg::default().value(), 1);
-        assert_eq!(
-            PrefixArg {
-                universal: 1,
-                ..Default::default()
-            }
-            .value(),
-            4
-        );
-        assert_eq!(
-            PrefixArg {
-                universal: 2,
-                ..Default::default()
-            }
-            .value(),
-            16
-        );
-        assert_eq!(
-            PrefixArg {
-                digits: Some(12),
-                ..Default::default()
-            }
-            .value(),
-            12
-        );
-        assert_eq!(
-            PrefixArg {
-                digits: Some(3),
-                negative: true,
-                ..Default::default()
-            }
-            .value(),
-            -3
-        );
-        assert_eq!(
-            PrefixArg {
-                negative: true,
-                ..Default::default()
-            }
-            .value(),
-            -1
-        );
-    }
 
     #[test]
     fn buffer_switch_create() {
@@ -905,14 +836,6 @@ mod tests {
         assert_eq!(ed.buf().name(), "foo.txt");
         ed.switch_to_buffer("*scratch*", false).unwrap();
         assert_eq!(ed.buf().name(), "*scratch*");
-    }
-
-    #[test]
-    fn invoke_tracks_last_command() {
-        let mut ed = Editor::new(20, 80);
-        ed.invoke_command("forward-char").unwrap();
-        assert_eq!(ed.last_command(), "forward-char");
-        ed.invoke_command("nosuchcommand").unwrap_err();
     }
 
     #[test]
@@ -955,6 +878,8 @@ mod tests {
     #[test]
     fn local_keymap_overrides_global() {
         let mut ed = Editor::new(20, 80);
+        ed.keymap_mut()
+            .bind_sequence(&crate::key::parse_sequence("C-f").unwrap(), "forward-char");
         let idx = ed.selected_buffer_index();
         ed.local_set_key(
             idx,
@@ -970,12 +895,14 @@ mod tests {
         ed.clear_pending_keys();
         ed.push_key(Key::ctrl('b'));
         let seq = ed.pending_keys().to_vec();
-        assert_eq!(ed.lookup_key(&seq), Lookup::Command("backward-char".into()));
+        assert_eq!(ed.lookup_key(&seq), Lookup::Unbound);
     }
 
     #[test]
     fn minor_keymap_has_priority() {
         let mut ed = Editor::new(20, 80);
+        ed.keymap_mut()
+            .bind_sequence(&crate::key::parse_sequence("C-f").unwrap(), "forward-char");
         let mut km = Keymap::new();
         km.bind(Key::ctrl('f'), "end-of-buffer");
         ed.register_minor_def(MinorModeDef {
@@ -1015,17 +942,43 @@ mod tests {
     }
 
     #[test]
-    fn mode_switch_installs_keymap_and_reparses() {
+    fn finish_command_installs_minibuffer() {
         let mut ed = Editor::new(20, 80);
-        ed.buf_mut().insert("fn main() {}");
-        let idx = ed.selected_buffer_index();
-        ed.set_buffer_mode_by_name(idx, "rust-mode").unwrap();
-        assert_eq!(ed.buf().mode().name, "rust-mode");
-        assert!(ed.buf().syntax_dirty());
-        ed.refresh_syntax_current();
-        assert!(ed.buf().syntax().is_some());
-        ed.set_buffer_mode_by_name(idx, "fundamental-mode").unwrap();
-        assert!(ed.buf().syntax().is_none());
-        assert_eq!(ed.buf().mode().name, "fundamental-mode");
+        let key = ed.finish_command(CommandOutcome::Pending(PendingRequest::ReadString {
+            prompt: "M-x ".into(),
+            completion: true,
+        }));
+        assert!(key.is_none());
+        assert!(ed.minibuffer().is_some());
+        assert!(matches!(
+            ed.pending(),
+            Some(PendingRequest::ReadString { .. })
+        ));
+        assert!(ed.minibuffer().unwrap().completion);
+        // Done clears both
+        let key = ed.finish_command(CommandOutcome::Done);
+        assert!(key.is_none());
+        assert!(ed.minibuffer().is_none());
+        assert!(ed.pending().is_none());
+    }
+
+    #[test]
+    fn finish_command_returns_replay_key() {
+        let mut ed = Editor::new(20, 80);
+        ed.set_read_key(Key::ctrl('a'));
+        ed.set_replay();
+        let key = ed.finish_command(CommandOutcome::Done);
+        assert_eq!(key, Some(Key::ctrl('a')));
+        // replay key is consumed
+        assert!(ed.finish_command(CommandOutcome::Done).is_none());
+    }
+
+    #[test]
+    fn search_forward_uses_rope() {
+        let mut ed = Editor::new(20, 80);
+        ed.buf_mut().insert("hello world hello");
+        assert_eq!(ed.search_forward("hello", 0), Some(0));
+        assert_eq!(ed.search_forward("hello", 1), Some(12));
+        assert_eq!(ed.search_backward("hello", 11), Some(0));
     }
 }

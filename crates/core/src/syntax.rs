@@ -284,11 +284,16 @@ pub fn line_segments(syntax: &Syntax, buf: &Buffer, line_idx: usize) -> Vec<Segm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mode::mode_for_path;
 
     fn buf_with(name: &str, text: &str) -> Buffer {
         let mut b = Buffer::from_reader(name, text.as_bytes()).unwrap();
-        let lang = mode_for_path(name).lang.expect("lang");
+        let lang = if name.ends_with(".rs") {
+            Lang::Rust
+        } else if name.ends_with(".lua") {
+            Lang::Lua
+        } else {
+            Lang::Cpp
+        };
         let s = parse(lang, text).expect("parse");
         b.set_syntax(Some(s));
         b

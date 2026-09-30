@@ -190,9 +190,9 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         return None;
     }
 
-    let completing = ed.minibuffer().is_some_and(|mb| {
-        mb.completion.is_some() && !mb.candidates.is_empty() && mb.candidates.len() >= 2
-    });
+    let completing = ed
+        .minibuffer()
+        .is_some_and(|mb| mb.completion && !mb.candidates.is_empty() && mb.candidates.len() >= 2);
     let echo_h: u16 = if completing { 2 } else { 1 };
 
     let body_h = area.height.saturating_sub(1 + echo_h);
@@ -292,7 +292,8 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         } else {
             line
         }
-    } else if let Some(emacs_core::minibuffer::Pending::YesNo { prompt, .. }) = ed.pending() {
+    } else if let Some(emacs_core::script::PendingRequest::ReadYesNo { prompt, .. }) = ed.pending()
+    {
         prompt.clone()
     } else if let Some(msg) = ed.echo() {
         msg.to_string()

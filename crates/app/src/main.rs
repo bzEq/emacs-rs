@@ -1,7 +1,9 @@
 //! emacs-rs: an Emacs-like editor with a rope-backed buffer.
 //!
-//! M1: command system, keymap with prefix keys, kill ring, undo, minibuffer
-//! (M-x, C-x C-f, ...), buffer switching, and LuaJIT scripting (init.lua).
+//! The Rust binary is a minimal core: terminal event loop, key dispatch,
+//! rendering, and rope primitives. Commands, modes, undo, the kill ring,
+//! isearch, and dired are implemented in Lua (the `lua/` runtime directory
+//! plus the user's init.lua), driven as coroutines from this loop.
 
 use std::io::{self, Stdout};
 use std::panic;
@@ -16,7 +18,7 @@ use crossterm::terminal::{
 use emacs_core::editor::Editor;
 use emacs_core::key::{Key, KeyCode, Modifiers};
 use emacs_core::keymap::Lookup;
-use emacs_core::minibuffer::Pending;
+use emacs_core::script::{CommandOutcome, PendingRequest, ResumeValue};
 use emacs_lua::LuaHost;
 use emacs_ui::render;
 use ratatui::backend::CrosstermBackend;
@@ -79,10 +81,19 @@ fn main() -> Result<()> {
 
     let mut ed = Editor::new(size.height.saturating_sub(2) as usize, size.width as usize);
 
-    // LuaJIT scripting engine + init.lua
+    // LuaJIT scripting engine: the lua/ runtime directory (all default
+    // commands, keybindings, and modes), then the user's init.lua.
     match LuaHost::new() {
         Ok(host) => {
             ed.attach_script(Box::new(host));
+            match lua_dir() {
+                Some(dir) => {
+                    if let Err(e) = ed.load_script_dir(&dir) {
+                        ed.error(format!("error loading {}: {e}", dir.display()));
+                    }
+                }
+                None => ed.error("cannot find the lua runtime directory"),
+            }
             let init = cli.init.clone().or_else(init_file);
             if let Some(init) = init {
                 if init.exists() {
@@ -93,24 +104,11 @@ fn main() -> Result<()> {
                     ed.error(format!("cannot open init file: {}", init.display()));
                 }
             }
-        }
-        Err(e) => eprintln!("LuaJIT unavailable: {e}"),
-    }
-
-    if let Some(path) = file_arg {
-        let p = std::path::PathBuf::from(&path);
-        if p.is_dir() {
-            let _ = emacs_core::dired::open_dir(&mut ed, &p, false);
-        } else {
-            match emacs_core::buffer::Buffer::load_file(&path) {
-                Ok(buf) => {
-                    let id = buf.id;
-                    ed.add_buffer(buf);
-                    ed.set_selected_buffer(id);
-                }
-                Err(e) => ed.error(format!("cannot open {path}: {e}")),
+            if let Err(e) = ed.run_startup(file_arg.as_deref()) {
+                ed.error(e.to_string());
             }
         }
+        Err(e) => eprintln!("LuaJIT unavailable: {e}"),
     }
 
     let result = run(&mut ed, &mut terminal);
@@ -118,6 +116,36 @@ fn main() -> Result<()> {
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
     result
+}
+
+/// Locate the Lua runtime directory: `EMACS_RS_LUA_DIR`, a `lua` directory
+/// next to the executable, `../lua` relative to it (the repo layout when
+/// running from `target/`), or the source tree `lua/` (dev builds).
+fn lua_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("EMACS_RS_LUA_DIR") {
+        let dir = PathBuf::from(dir);
+        if dir.is_dir() {
+            return Some(dir);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    let base = exe.parent()?;
+    let next_to = base.join("lua");
+    if next_to.is_dir() {
+        return Some(next_to);
+    }
+    let up_one = base.parent()?.join("lua");
+    if up_one.is_dir() {
+        return Some(up_one);
+    }
+    let source_tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("lua");
+    if source_tree.is_dir() {
+        return Some(source_tree);
+    }
+    None
 }
 
 fn init_file() -> Option<PathBuf> {
@@ -206,8 +234,8 @@ fn to_key(ke: &crossterm::event::KeyEvent) -> Option<Key> {
     Some(Key { code, mods })
 }
 
-/// One key press into the current input state (minibuffer, pending prompt,
-/// or the normal keymap).
+/// One key press into the current input state (a pending command request,
+/// or the normal keymap dispatch).
 fn handle_key(ed: &mut Editor, key: Key) -> Result<()> {
     let key = translate_after_ctrl_x(ed, key);
     // Esc acts as a Meta prefix (ESC x == M-x).
@@ -254,18 +282,6 @@ fn translate_after_ctrl_x(ed: &Editor, key: Key) -> Key {
 }
 
 fn dispatch(ed: &mut Editor, key: Key) -> Result<()> {
-    if ed.isearch_active() {
-        match emacs_core::isearch::handle_key(ed, &key)? {
-            emacs_core::isearch::ISearchResult::Consumed => return Ok(()),
-            emacs_core::isearch::ISearchResult::Exit { replay: Some(k) } => {
-                return dispatch(ed, k);
-            }
-            emacs_core::isearch::ISearchResult::Exit { replay: None } => return Ok(()),
-        }
-    }
-    if ed.minibuffer().is_some() {
-        return minibuffer_key(ed, key);
-    }
     if ed.pending().is_some() {
         return pending_key(ed, key);
     }
@@ -289,29 +305,59 @@ fn dispatch(ed: &mut Editor, key: Key) -> Result<()> {
     };
     let name = name.unwrap();
     ed.clear_pending_keys();
-    if name == "self-insert-command" {
-        if let KeyCode::Char(c) = key.code {
-            ed.set_self_insert_char(Some(c));
+    let extra = match (name.as_str(), key.code) {
+        ("self-insert-command", KeyCode::Char(c)) => Some(c),
+        _ => None,
+    };
+    run_command(ed, &name, extra);
+    Ok(())
+}
+
+/// Run a Lua command; store any pending input request it makes.
+fn run_command(ed: &mut Editor, name: &str, extra: Option<char>) {
+    match ed.call_command(name, extra) {
+        Ok(outcome) => {
+            if let Some(key) = ed.finish_command(outcome) {
+                let _ = dispatch(ed, key);
+            }
+        }
+        Err(e) => {
+            ed.finish_command(CommandOutcome::Done);
+            ed.error(e.to_string());
         }
     }
-    if let Err(e) = ed.invoke_command(&name) {
-        ed.error(e.to_string());
+}
+
+/// Resume a suspended command coroutine with a value.
+fn resume(ed: &mut Editor, value: ResumeValue) -> Result<()> {
+    match ed.resume_pending(value) {
+        Ok(outcome) => {
+            if let Some(key) = ed.finish_command(outcome) {
+                return dispatch(ed, key);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            ed.finish_command(CommandOutcome::Done);
+            ed.error(e.to_string());
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 /// Recompute completion candidates from the minibuffer input. When `fill`
 /// is set the longest common prefix is auto-filled; after deletions it must
 /// be false so the auto-fill doesn't re-insert deleted characters.
 fn update_completion(ed: &mut Editor, fill: bool) {
-    let Some(completer) = ed.minibuffer().and_then(|mb| mb.completion) else {
+    let has_completion = ed.minibuffer().is_some_and(|mb| mb.completion);
+    if !has_completion {
         return;
-    };
+    }
     let input = ed
         .minibuffer()
         .map(|mb| mb.input.clone())
         .unwrap_or_default();
-    let candidates = completer(ed, &input);
+    let candidates = ed.update_completion(&input).unwrap_or_default();
     if let Some(mb) = ed.minibuffer_mut() {
         mb.complete_with(candidates, fill);
     }
@@ -321,9 +367,35 @@ fn update_completion(ed: &mut Editor, fill: bool) {
         .minibuffer()
         .map(|mb| mb.input.clone())
         .unwrap_or_default();
-    let candidates = completer(ed, &input);
+    let candidates = ed.update_completion(&input).unwrap_or_default();
     if let Some(mb) = ed.minibuffer_mut() {
         mb.candidates = candidates;
+    }
+}
+
+/// Keys while a command is waiting for input.
+fn pending_key(ed: &mut Editor, key: Key) -> Result<()> {
+    let request = ed.pending().cloned();
+    match request {
+        Some(PendingRequest::ReadString { .. }) => minibuffer_key(ed, key),
+        Some(PendingRequest::ReadYesNo { .. }) => {
+            let answer = match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
+                KeyCode::Char('n') | KeyCode::Char('N') => Some(false),
+                KeyCode::Char('g') if key.mods.contains(Modifiers::CONTROL) => None,
+                _ => return Ok(()),
+            };
+            if answer.is_none() {
+                ed.message("Quit");
+                return resume(ed, ResumeValue::Bool(None));
+            }
+            resume(ed, ResumeValue::Bool(answer))
+        }
+        Some(PendingRequest::ReadKey) => {
+            ed.set_read_key(key);
+            resume(ed, ResumeValue::Key(key))
+        }
+        None => Ok(()),
     }
 }
 
@@ -334,8 +406,8 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
     match key.code {
         Char(c) if m.contains(Modifiers::CONTROL) => match c {
             'g' => {
-                ed.abort_pending();
                 ed.message("Quit");
+                return resume(ed, ResumeValue::String(None));
             }
             'a' => {
                 if let Some(mb) = ed.minibuffer_mut() {
@@ -381,7 +453,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
         }
         Enter => {
             let input = ed.minibuffer().map(|mb| mb.accepted()).unwrap_or_default();
-            ed.finish_read_string(input)?;
+            return resume(ed, ResumeValue::String(Some(input)));
         }
         Tab => {
             let had_preview = ed.minibuffer().is_some_and(|mb| !mb.preview.is_empty());
@@ -444,75 +516,6 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             }
         }
         _ => {}
-    }
-    Ok(())
-}
-
-/// Keys while a continuation is pending (yes/no prompt, describe-key).
-fn pending_key(ed: &mut Editor, key: Key) -> Result<()> {
-    // describe-key: accumulate until the sequence resolves.
-    if matches!(ed.pending(), Some(Pending::ReadKey { .. })) {
-        let mut resolved = false;
-        if let Some(Pending::ReadKey { keys }) = ed.pending_mut() {
-            keys.push(key);
-            let seq = keys.clone();
-            match ed.lookup_key(&seq) {
-                Lookup::Command(name) => {
-                    let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
-                    let doc = ed.commands().get(&name).map(|c| c.doc).unwrap_or("");
-                    let doc = if doc.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {doc}")
-                    };
-                    ed.set_pending(None);
-                    ed.message(format!(
-                        "{} runs the command {}{}",
-                        seqs.join(" "),
-                        name,
-                        doc
-                    ));
-                    resolved = true;
-                }
-                Lookup::Prefix => {
-                    let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
-                    ed.message(format!("{}-", seqs.join(" ")));
-                    resolved = true;
-                }
-                Lookup::Unbound => {
-                    let seqs: Vec<String> = seq.iter().map(|k| k.to_string()).collect();
-                    ed.set_pending(None);
-                    ed.error(format!("{} is undefined", seqs.join(" ")));
-                    resolved = true;
-                }
-            }
-        }
-        if resolved {
-            return Ok(());
-        }
-        return Ok(());
-    }
-
-    // yes/no prompt
-    let is_yesno = matches!(ed.pending(), Some(Pending::YesNo { .. }));
-    if is_yesno {
-        let answer = match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
-            KeyCode::Char('n') | KeyCode::Char('N') => Some(false),
-            KeyCode::Char('g') if key.mods.contains(Modifiers::CONTROL) => None,
-            _ => return Ok(()),
-        };
-        if answer.is_none() {
-            ed.abort_pending();
-            ed.message("Quit");
-            return Ok(());
-        }
-        if let Some(Pending::YesNo { cont, .. }) = ed.take_pending() {
-            let r = cont(ed, answer.unwrap());
-            if let Err(e) = r {
-                ed.error(e.to_string());
-            }
-        }
     }
     Ok(())
 }

@@ -8,9 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ropey::Rope;
 
 use crate::keymap::Keymap;
-use crate::mode::{fundamental, mode_for_path, Mode};
+use crate::mode::{fundamental, Mode};
 use crate::syntax::Syntax;
-use crate::undo::UndoLog;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -35,6 +34,9 @@ impl Direction {
 /// Vertical motion remembers the goal column (Emacs MOVE_TO_VAR semantics).
 /// CRLF files are treated as LF: cursor motion steps over `\r\n` as a unit
 /// and the trailing `\r` is invisible to point.
+///
+/// This is a *primitive* buffer: edits do not record undo information; the
+/// Lua layer maintains undo lists on top of these primitives.
 #[derive(Debug)]
 pub struct Buffer {
     pub id: usize,
@@ -48,18 +50,15 @@ pub struct Buffer {
     modified: bool,
     /// The mark, if set (C-SPC).
     mark: Option<usize>,
-    undo: UndoLog,
     /// True when the buffer content should be treated as read-only
-    /// (used for *Help*).
+    /// (used for *Help* and dired listings).
     read_only: bool,
-    /// Major mode (language + indent behavior).
+    /// Major mode (language for highlighting + name shown in the modeline).
     mode: Mode,
     /// Local keymap installed by the major mode / buffer-local bindings.
     local_keymap: Option<Keymap>,
     /// Names of enabled minor modes, in enable order (last = most recent).
     enabled_minor: Vec<String>,
-    /// Dired directory listing state, if this is a dired buffer.
-    dired: Option<crate::dired::DiredState>,
     /// Parsed syntax tree for highlighting, if the mode has a language.
     syntax: Option<Syntax>,
     /// Set by edits while a language mode is active; triggers re-parse.
@@ -79,12 +78,10 @@ impl Buffer {
             goal_column: None,
             modified: false,
             mark: None,
-            undo: UndoLog::default(),
             read_only: false,
             mode: fundamental(),
             local_keymap: None,
             enabled_minor: Vec::new(),
-            dired: None,
             syntax: None,
             syntax_dirty: false,
             syntax_last_parse: None,
@@ -92,30 +89,25 @@ impl Buffer {
     }
 
     /// Build a buffer from any reader. Streaming, so peak memory stays flat
-    /// even for very large inputs. The mode is picked from `name` (file
-    /// extension).
+    /// even for very large inputs. Starts in fundamental mode; the Lua layer
+    /// picks the mode from the file name.
     pub fn from_reader(name: impl Into<String>, reader: impl Read) -> std::io::Result<Self> {
-        let name = name.into();
-        let mode = mode_for_path(&name);
-        let has_lang = mode.lang.is_some();
         let rope = Rope::from_reader(BufReader::new(reader))?;
         Ok(Buffer {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            name,
+            name: name.into(),
             path: None,
             rope,
             point: 0,
             goal_column: None,
             modified: false,
             mark: None,
-            undo: UndoLog::default(),
             read_only: false,
-            mode,
+            mode: fundamental(),
             local_keymap: None,
             enabled_minor: Vec::new(),
-            dired: None,
             syntax: None,
-            syntax_dirty: has_lang,
+            syntax_dirty: false,
             syntax_last_parse: None,
         })
     }
@@ -253,18 +245,6 @@ impl Buffer {
 
     pub fn disable_minor_mode(&mut self, name: &str) {
         self.enabled_minor.retain(|m| m != name);
-    }
-
-    pub fn dired(&self) -> Option<&crate::dired::DiredState> {
-        self.dired.as_ref()
-    }
-
-    pub fn dired_mut(&mut self) -> Option<&mut crate::dired::DiredState> {
-        self.dired.as_mut()
-    }
-
-    pub fn set_dired(&mut self, dired: Option<crate::dired::DiredState>) {
-        self.dired = dired;
     }
 
     pub fn syntax(&self) -> Option<&Syntax> {
@@ -447,7 +427,6 @@ impl Buffer {
         }
         let len = text.chars().count();
         self.rope.insert(self.point, text);
-        self.undo.record_insert(self.point, len);
         if let Some(m) = self.mark.as_mut() {
             if *m >= self.point {
                 *m += len;
@@ -459,13 +438,33 @@ impl Buffer {
         self.syntax_dirty |= self.mode.lang.is_some();
     }
 
+    /// Insert `text` at `pos` (not necessarily point); point is unchanged.
+    pub fn insert_at(&mut self, pos: usize, text: &str) {
+        let pos = pos.min(self.rope.len_chars());
+        let len = text.chars().count();
+        if len == 0 {
+            return;
+        }
+        self.rope.insert(pos, text);
+        if let Some(m) = self.mark.as_mut() {
+            if *m >= pos {
+                *m += len;
+            }
+        }
+        if self.point > pos {
+            self.point += len;
+        }
+        self.modified = true;
+        self.syntax_dirty |= self.mode.lang.is_some();
+    }
+
     pub fn insert_char(&mut self, c: char) {
         let mut buf = [0u8; 4];
         self.insert(c.encode_utf8(&mut buf));
     }
 
     /// Delete `start..end` and return the removed text. Adjusts point and
-    /// mark; records an undo entry.
+    /// mark; does not record undo information.
     pub fn delete_range(&mut self, start: usize, end: usize) -> String {
         if end <= start || start >= self.rope.len_chars() {
             return String::new();
@@ -473,7 +472,6 @@ impl Buffer {
         let end = end.min(self.rope.len_chars());
         let text = self.rope.slice(start..end).to_string();
         self.rope.remove(start..end);
-        self.undo.record_delete(start, text.clone());
         if let Some(m) = self.mark.as_mut() {
             if *m >= start {
                 *m = if *m <= end { start } else { *m - (end - start) };
@@ -506,43 +504,6 @@ impl Buffer {
         let end = self.step_right(self.point);
         self.delete_range(self.point, end);
         true
-    }
-
-    // --- undo --------------------------------------------------------------
-
-    /// Add an undo boundary if the last entry isn't one.
-    pub fn undo_boundary(&mut self) {
-        self.undo.boundary();
-    }
-
-    /// Undo the most recent group of changes. Returns false if there is
-    /// nothing to undo.
-    pub fn undo(&mut self) -> bool {
-        if self.undo.is_empty() {
-            return false;
-        }
-        self.undo.pop_boundary();
-        let mut did = false;
-        loop {
-            match self.undo.pop() {
-                None => break,
-                Some(crate::undo::UndoEntry::Boundary) => break,
-                Some(crate::undo::UndoEntry::Insert { pos, len }) => {
-                    let end = (pos + len).min(self.rope.len_chars());
-                    self.rope.remove(pos..end);
-                    self.point = pos;
-                    did = true;
-                }
-                Some(crate::undo::UndoEntry::Delete { pos, text }) => {
-                    self.rope.insert(pos, &text);
-                    self.point = pos + text.chars().count();
-                    did = true;
-                }
-            }
-        }
-        self.undo.boundary();
-        self.modified = true;
-        did
     }
 
     /// Swap point and mark (`exchange-point-and-mark`).
@@ -638,6 +599,17 @@ mod tests {
     }
 
     #[test]
+    fn insert_at_keeps_point_and_mark() {
+        let mut b = buf("0123456789");
+        b.set_mark(Some(4));
+        b.set_point(6);
+        b.insert_at(2, "xx");
+        assert_eq!(b.rope().to_string(), "01xx23456789");
+        assert_eq!(b.point(), 8, "point shifts with the insert");
+        assert_eq!(b.mark(), Some(6), "mark shifts with the insert");
+    }
+
+    #[test]
     fn crlf_delete_pair() {
         let mut b = buf("a\r\nb");
         b.move_to_buffer_end();
@@ -669,38 +641,5 @@ mod tests {
         assert_eq!(b.point(), 5);
         assert_eq!(b.mark(), Some(2));
         assert_eq!(b.rope().to_string(), "0156789");
-    }
-
-    #[test]
-    fn undo_insert_and_delete() {
-        let mut b = buf("ab");
-        b.undo_boundary();
-        b.move_to_buffer_end();
-        b.insert("cd");
-        assert_eq!(b.rope().to_string(), "abcd");
-        b.undo_boundary();
-        b.move_to_buffer_start();
-        b.delete_forward();
-        assert_eq!(b.rope().to_string(), "bcd");
-        // undo the delete
-        assert!(b.undo());
-        assert_eq!(b.rope().to_string(), "abcd");
-        assert_eq!(b.point(), 1);
-        // undo the insert
-        assert!(b.undo());
-        assert_eq!(b.rope().to_string(), "ab");
-        assert_eq!(b.point(), 2);
-    }
-
-    #[test]
-    fn undo_group_until_boundary() {
-        let mut b = buf("");
-        b.undo_boundary();
-        b.insert("a");
-        b.insert("b");
-        b.insert("c");
-        assert!(b.undo());
-        assert_eq!(b.rope().to_string(), "", "one undo removes the whole group");
-        assert!(!b.undo(), "nothing left to undo");
     }
 }
