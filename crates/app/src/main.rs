@@ -86,13 +86,18 @@ fn main() -> Result<()> {
     match LuaHost::new() {
         Ok(host) => {
             ed.attach_script(Box::new(host));
+            let mut runtime_ok = true;
             match lua_dir() {
-                Some(dir) => {
+                Ok(dir) => {
                     if let Err(e) = ed.load_script_dir(&dir) {
                         ed.error(format!("error loading {}: {e}", dir.display()));
+                        runtime_ok = false;
                     }
                 }
-                None => ed.error("cannot find the lua runtime directory"),
+                Err(msg) => {
+                    ed.error(msg);
+                    runtime_ok = false;
+                }
             }
             let init = cli.init.clone().or_else(init_file);
             if let Some(init) = init {
@@ -104,8 +109,10 @@ fn main() -> Result<()> {
                     ed.error(format!("cannot open init file: {}", init.display()));
                 }
             }
-            if let Err(e) = ed.run_startup(file_arg.as_deref()) {
-                ed.error(e.to_string());
+            if runtime_ok {
+                if let Err(e) = ed.run_startup(file_arg.as_deref()) {
+                    ed.error(e.to_string());
+                }
             }
         }
         Err(e) => eprintln!("LuaJIT unavailable: {e}"),
@@ -121,31 +128,50 @@ fn main() -> Result<()> {
 /// Locate the Lua runtime directory: `EMACS_RS_LUA_DIR`, a `lua` directory
 /// next to the executable, `../lua` relative to it (the repo layout when
 /// running from `target/`), or the source tree `lua/` (dev builds).
-fn lua_dir() -> Option<PathBuf> {
+///
+/// A candidate is only accepted if it contains the runtime entry point
+/// (`00-api.lua`), so a stale or unrelated `lua/` directory near the
+/// binary cannot silently shadow the real runtime and break the editor.
+fn lua_dir() -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("EMACS_RS_LUA_DIR") {
         let dir = PathBuf::from(dir);
-        if dir.is_dir() {
-            return Some(dir);
+        if runtime_entry(&dir) {
+            return Ok(dir);
+        }
+        return Err(format!(
+            "EMACS_RS_LUA_DIR is set to {}, but the Lua runtime (00-api.lua) is not there",
+            dir.display()
+        ));
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(base) = exe.parent() {
+            candidates.push(base.join("lua"));
+            if let Some(parent) = base.parent() {
+                candidates.push(parent.join("lua"));
+            }
         }
     }
-    let exe = std::env::current_exe().ok()?;
-    let base = exe.parent()?;
-    let next_to = base.join("lua");
-    if next_to.is_dir() {
-        return Some(next_to);
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("lua"),
+    );
+    for dir in candidates {
+        if runtime_entry(&dir) {
+            return Ok(dir);
+        }
     }
-    let up_one = base.parent()?.join("lua");
-    if up_one.is_dir() {
-        return Some(up_one);
-    }
-    let source_tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("lua");
-    if source_tree.is_dir() {
-        return Some(source_tree);
-    }
-    None
+    Err(
+        "cannot find the Lua runtime: searched lua/ next to the executable, ../lua, \
+         and the source tree; set EMACS_RS_LUA_DIR"
+            .into(),
+    )
+}
+
+fn runtime_entry(dir: &std::path::Path) -> bool {
+    dir.join("00-api.lua").is_file()
 }
 
 fn init_file() -> Option<PathBuf> {

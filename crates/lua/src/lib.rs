@@ -87,17 +87,29 @@ fn parse_keymap_table(_lua: &Lua, table: Option<Table>) -> mlua::Result<Option<K
     }
 }
 
+/// The `_internals` table installed by the Lua runtime; a clear error when
+/// the runtime never loaded (bad or missing `lua/` directory).
+fn internals_table(lua: &Lua) -> mlua::Result<Table> {
+    lua.globals()
+        .get::<Option<Table>>("_internals")?
+        .ok_or_else(|| {
+            mlua::Error::RuntimeError(
+                "the Lua runtime did not load (_internals is missing); \
+                 check the lua/ runtime directory"
+                    .into(),
+            )
+        })
+}
+
 /// The `_internals.run_command(name, extra)` entry point installed by the
 /// Lua runtime.
 fn run_command_fn(lua: &Lua) -> mlua::Result<Function> {
-    let internals: Table = lua.globals().get("_internals")?;
-    internals.get("run_command")
+    internals_table(lua)?.get("run_command")
 }
 
 /// The `_internals.startup(path)` entry point installed by the Lua runtime.
 fn startup_fn(lua: &Lua) -> mlua::Result<Function> {
-    let internals: Table = lua.globals().get("_internals")?;
-    internals.get("startup")
+    internals_table(lua)?.get("startup")
 }
 
 /// Decode the result of resuming a command coroutine: either the command

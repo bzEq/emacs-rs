@@ -204,12 +204,29 @@ impl Em {
     /// Spawn `em` using an existing scratch dir (so the caller can seed an
     /// init.lua and files first). The caller keeps ownership of the dir.
     pub fn spawn_with_scratch(scratch: PathBuf, args: &[&str]) -> Self {
+        Self::spawn_with_scratch_env(scratch, &[], args)
+    }
+
+    /// Spawn `em` with extra environment variables.
+    pub fn spawn_with_env(envs: &[(&str, &str)], args: &[&str]) -> Self {
+        let mut em = Self::spawn_with_scratch_env(unique_scratch(), envs, args);
+        em.remove_scratch = true;
+        em
+    }
+
+    /// Spawn `em` with an existing scratch dir and extra environment
+    /// variables.
+    pub fn spawn_with_scratch_env(scratch: PathBuf, envs: &[(&str, &str)], args: &[&str]) -> Self {
         let bin = em_binary();
         let (master, slave) = openpty(24, 80);
-        let child = Command::new(&bin)
-            .args(args)
+        let mut cmd = Command::new(&bin);
+        cmd.args(args)
             .env("XDG_CONFIG_HOME", scratch.join("cfg"))
-            .env("TERM", "xterm-256color")
+            .env("TERM", "xterm-256color");
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let child = cmd
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave))
