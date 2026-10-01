@@ -497,13 +497,31 @@ impl LuaHost {
         raw.set(
             "search_forward",
             lua.create_function(|lua, (query, from): (String, usize)| {
-                Ok(editor_ref(lua)?.search_forward(&query, from))
+                Ok(editor_ref(lua)?
+                    .search_forward(&query, from)
+                    .map_or((None, None), |(s, e)| (Some(s), Some(e))))
             })?,
         )?;
         raw.set(
             "search_backward",
             lua.create_function(|lua, (query, from): (String, usize)| {
-                Ok(editor_ref(lua)?.search_backward(&query, from))
+                Ok(editor_ref(lua)?
+                    .search_backward(&query, from)
+                    .map_or((None, None), |(s, e)| (Some(s), Some(e))))
+            })?,
+        )?;
+        raw.set(
+            "set_search_match",
+            lua.create_function(|lua, (start, end): (usize, usize)| {
+                editor_ref(lua)?.set_search_match(Some((start, end)));
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "clear_search_match",
+            lua.create_function(|lua, ()| {
+                editor_ref(lua)?.set_search_match(None);
+                Ok(())
             })?,
         )?;
         raw.set(

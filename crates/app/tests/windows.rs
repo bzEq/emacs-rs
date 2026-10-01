@@ -61,6 +61,50 @@ fn wait_for_count(em: &mut Em, n: usize) -> bool {
 }
 
 #[test]
+fn isearch_prompt_appears_immediately() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.txt", "hello world\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("hello world", 5000));
+    em.keys(b"\x13"); // a single C-s
+    assert!(
+        em.wait_for("I-search:", 3000),
+        "prompt shows on the first C-s, without typing"
+    );
+    em.keys(b"\x07"); // C-g aborts
+    assert!(em.wait_for("Quit", 3000));
+    em.quit();
+}
+
+#[test]
+fn isearch_highlights_the_current_match() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.txt", "hello world\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("hello world", 5000));
+    em.keys(b"\x13"); // C-s
+    em.type_str("hello");
+    assert!(em.wait_for("I-search: hello", 3000), "query shown");
+    em.drain();
+    assert!(
+        em.raw_contains(b"48;5;3m"),
+        "current match highlighted (48;5;3 = Yellow bg)"
+    );
+    // C-g clears the highlight
+    let marker = em.raw.len();
+    em.keys(b"\x07");
+    assert!(em.wait_for("Quit", 3000));
+    em.drain();
+    assert!(
+        !em.raw[marker..].windows(7).any(|w| w == b"48;5;3m"),
+        "highlight gone after C-g"
+    );
+    em.quit();
+}
+
+#[test]
 fn isearch_finds_match() {
     let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "hello world\nsecond line\n");

@@ -9,3 +9,4 @@ pub mod script;
 pub mod search;
 pub mod view;
 pub mod window;
+pub mod wrap;

@@ -29,19 +29,19 @@ function isearch.run(forward)
     else
       from = matched or p
     end
-    local found
+    local found, found_end
     if forward then
-      found = raw.search_forward(query, from)
+      found, found_end = raw.search_forward(query, from)
       if not found and not restart and from > 0 then
-        found = raw.search_forward(query, 0)
+        found, found_end = raw.search_forward(query, 0)
         wrapped = found ~= nil
       else
         wrapped = false
       end
     else
-      found = raw.search_backward(query, from)
+      found, found_end = raw.search_backward(query, from)
       if not found and not restart and from < len then
-        found = raw.search_backward(query, len)
+        found, found_end = raw.search_backward(query, len)
         wrapped = found ~= nil
       else
         wrapped = false
@@ -51,20 +51,27 @@ function isearch.run(forward)
       matched = found
       failed = false
       raw.set_point(found)
+      raw.set_search_match(found, found_end)
     else
       matched = nil
       failed = query ~= ""
       wrapped = false
+      raw.clear_search_match()
     end
   end
 
   local special = { RET = true, TAB = true, DEL = true, ESC = true, SPC = true }
+
+  -- show the prompt immediately, before waiting for the first key
+  -- (Emacs shows "I-search:" as soon as C-s is pressed)
+  emacs.message(prompt())
 
   while true do
     local key = emacs.read_key()
     if key == "C-g" then
       raw.set_point(start)
       raw.deactivate_mark()
+      raw.clear_search_match()
       emacs.message("Quit")
       return
     elseif key == "C-s" then
@@ -107,6 +114,7 @@ function isearch.run(forward)
       step(true)
       emacs.message(prompt())
     elseif key == "RET" or key == "ESC" then
+      raw.clear_search_match()
       return
     elseif key == "SPC" then
       query = query .. " "
@@ -120,6 +128,7 @@ function isearch.run(forward)
       step(true)
       emacs.message(prompt())
     else
+      raw.clear_search_match()
       emacs.replay_key()
       return
     end

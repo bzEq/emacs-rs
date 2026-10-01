@@ -1,14 +1,16 @@
-//! Terminal rendering: window tree, modeline, echo area / minibuffer, cursor.
+//! Terminal rendering: window tree, modeline, echo area / minibuffer,
+//! cursor. Long lines wrap to the window width (word-wrap), computed by
+//! `emacs_core::wrap` so scrolling and rendering agree.
 
 use emacs_core::editor::Editor;
 use emacs_core::view::View;
+use emacs_core::wrap::{self, RowWalker};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TuiLine, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-pub const TAB_WIDTH: usize = 8;
 pub const GUTTER_WIDTH: u16 = 5;
 
 /// Line content excluding the trailing `\r`/`\n`.
@@ -23,24 +25,12 @@ fn visible_content(s: ropey::RopeSlice<'_>) -> ropey::RopeSlice<'_> {
     }
 }
 
-fn visual_col(s: ropey::RopeSlice<'_>) -> usize {
-    let mut col = 0usize;
-    for c in s.chars() {
-        col += if c == '\t' {
-            TAB_WIDTH - col % TAB_WIDTH
-        } else {
-            1
-        };
-    }
-    col
-}
-
 fn expand_tabs(s: ropey::RopeSlice<'_>) -> String {
     let mut col = 0usize;
     let mut out = String::with_capacity(s.len_chars());
     for c in s.chars() {
         if c == '\t' {
-            let spaces = TAB_WIDTH - col % TAB_WIDTH;
+            let spaces = wrap::TAB_WIDTH - col % wrap::TAB_WIDTH;
             out.extend(std::iter::repeat_n(' ', spaces));
             col += spaces;
         } else {
@@ -51,7 +41,13 @@ fn expand_tabs(s: ropey::RopeSlice<'_>) -> String {
     out
 }
 
-fn render_window(frame: &mut Frame, buf: &emacs_core::buffer::Buffer, view: &View, rect: Rect) {
+fn render_window(
+    frame: &mut Frame,
+    buf: &emacs_core::buffer::Buffer,
+    view: &View,
+    rect: Rect,
+    search_match: Option<(usize, usize)>,
+) {
     let line_numbers = buf.minor_mode_enabled("line-numbers");
     let gutter_w = if line_numbers { GUTTER_WIDTH } else { 0 };
     let text_rect = if gutter_w > 0 && rect.width > gutter_w {
@@ -63,30 +59,35 @@ fn render_window(frame: &mut Frame, buf: &emacs_core::buffer::Buffer, view: &Vie
     } else {
         rect
     };
+    let width = text_rect.width.max(1) as usize;
+    let region = buf.region();
+    let mut walker = RowWalker::new(buf, width, view.top_row);
+    let mut lines: Vec<TuiLine> = Vec::new();
+    let mut nums: Vec<TuiLine> = Vec::new();
+    for _ in 0..text_rect.height as usize {
+        let Some((line_idx, seg, s, e)) = walker.next_row() else {
+            break;
+        };
+        if line_numbers {
+            // line numbers only on the first visual row of a wrapped line
+            if seg == 0 {
+                nums.push(TuiLine::styled(
+                    format!("{:>width$} ", line_idx + 1, width = gutter_w as usize - 1),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
+                nums.push(TuiLine::from(""));
+            }
+        }
+        lines.push(render_segment(buf, line_idx, s, e, region, search_match));
+    }
     if line_numbers && gutter_w > 0 && rect.width > gutter_w {
         let gutter = Rect {
             width: gutter_w,
             ..rect
         };
-        let nums: Vec<TuiLine> = (0..rect.height as usize)
-            .filter_map(|i| {
-                let line_idx = view.top_line + i;
-                (line_idx < buf.len_lines()).then(|| {
-                    TuiLine::styled(
-                        format!("{:>width$} ", line_idx + 1, width = gutter_w as usize - 1),
-                        Style::default().fg(Color::DarkGray),
-                    )
-                })
-            })
-            .collect();
         frame.render_widget(Paragraph::new(nums), gutter);
     }
-    let lines: Vec<TuiLine> = (0..text_rect.height as usize)
-        .filter_map(|i| {
-            let line_idx = view.top_line + i;
-            (line_idx < buf.len_lines()).then(|| render_line(buf, line_idx, buf.region()))
-        })
-        .collect();
     frame.render_widget(Paragraph::new(lines), text_rect);
 }
 
@@ -103,50 +104,102 @@ fn slice_cols(s: &str, a: usize, b: usize) -> &str {
     &s[start..end]
 }
 
-/// One line, rendered plain (tab-expanded). When the mark is set, the
-/// columns between point and mark get the active-region background
-/// (Emacs transient-mark-mode).
-fn render_line(
+/// One wrapped segment of a line, rendered plain (tab-expanded). When the
+/// mark is set, the columns between point and mark get the active-region
+/// background (transient-mark-mode); the current isearch match gets a
+/// yellow background. Highlight columns are mapped through tab expansion.
+fn render_segment(
     buf: &emacs_core::buffer::Buffer,
     line_idx: usize,
+    seg_start: usize,
+    seg_end: usize,
     region: Option<(usize, usize)>,
+    search_match: Option<(usize, usize)>,
 ) -> TuiLine<'static> {
-    let content = visible_content(buf.line(line_idx));
+    let line = buf.line(line_idx);
+    let content = visible_content(line.slice(seg_start..seg_end));
     if content.len_chars() == 0 {
         return TuiLine::from("");
     }
     let plain = expand_tabs(content);
-    if content.chars().any(|c| c == '\t') {
-        // tab expansion shifts highlight columns; render plain
-        return TuiLine::from(plain);
-    }
-    let total = plain.chars().count();
-    let mut spans: Vec<Span<'static>> = Vec::new();
+    let line_start = buf.rope().line_to_char(line_idx);
+    let abs_start = line_start + seg_start;
+    let abs_end = line_start + seg_end;
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(plain.clone())];
     if let Some((rs, re)) = region {
-        let line_start = buf.rope().line_to_char(line_idx);
-        let line_end = line_start + buf.line_len_chars(line_idx);
-        let r_start = rs.max(line_start).saturating_sub(line_start);
-        let r_end = re.min(line_end).saturating_sub(line_start);
-        if r_end > r_start {
-            let before = slice_cols(&plain, 0, r_start);
-            let inside = slice_cols(&plain, r_start, r_end);
-            let after = slice_cols(&plain, r_end, total);
-            if !before.is_empty() {
-                spans.push(Span::raw(before.to_string()));
-            }
-            if !inside.is_empty() {
-                spans.push(Span::styled(
-                    inside.to_string(),
-                    Style::default().bg(Color::LightBlue),
-                ));
-            }
-            if !after.is_empty() {
-                spans.push(Span::raw(after.to_string()));
-            }
-            return TuiLine::from(spans);
+        if let Some((a, b)) = line_range(rs, re, abs_start, abs_end) {
+            let (va, vb) = visual_range(content, a, b);
+            spans = highlight_range(spans, &plain, va, vb, Color::LightBlue);
         }
     }
-    TuiLine::from(plain)
+    if let Some((ss, se)) = search_match {
+        if let Some((a, b)) = line_range(ss, se, abs_start, abs_end) {
+            let (va, vb) = visual_range(content, a, b);
+            spans = highlight_range(spans, &plain, va, vb, Color::Yellow);
+        }
+    }
+    TuiLine::from(spans)
+}
+
+/// Intersection of a buffer char range with a segment's absolute range,
+/// as segment-relative char columns.
+fn line_range(
+    start: usize,
+    end: usize,
+    seg_abs_start: usize,
+    seg_abs_end: usize,
+) -> Option<(usize, usize)> {
+    let a = start.max(seg_abs_start).saturating_sub(seg_abs_start);
+    let b = end.min(seg_abs_end).saturating_sub(seg_abs_start);
+    (b > a).then_some((a, b))
+}
+
+/// Segment-relative char columns mapped to visual columns (tab-aware).
+/// Clamped to the visible content (the trailing newline is stripped).
+fn visual_range(content: ropey::RopeSlice<'_>, start: usize, end: usize) -> (usize, usize) {
+    let len = content.len_chars();
+    (
+        wrap::visual_width(content.slice(..start.min(len))),
+        wrap::visual_width(content.slice(..end.min(len))),
+    )
+}
+
+/// Give the columns of `range` in `plain` the given background, splitting
+/// the existing spans as needed.
+fn highlight_range(
+    spans: Vec<Span<'static>>,
+    plain: &str,
+    range_start: usize,
+    range_end: usize,
+    color: Color,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+    for span in spans {
+        let len = span.content.chars().count();
+        let (s, e) = (col, col + len);
+        let rs = range_start.max(s);
+        let re = range_end.min(e);
+        if re > rs {
+            let before = slice_cols(&span.content, 0, rs - s);
+            let inside = slice_cols(&span.content, rs - s, re - s);
+            let after = slice_cols(&span.content, re - s, len);
+            if !before.is_empty() {
+                out.push(Span::styled(before.to_string(), span.style));
+            }
+            if !inside.is_empty() {
+                out.push(Span::styled(inside.to_string(), span.style.bg(color)));
+            }
+            if !after.is_empty() {
+                out.push(Span::styled(after.to_string(), span.style));
+            }
+        } else {
+            out.push(span);
+        }
+        col = e;
+    }
+    let _ = plain;
+    out
 }
 
 /// Modeline for a buffer, Emacs-style: `--`/`**` + `%` for read-only, name,
@@ -214,7 +267,8 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
             width: l.rect.w,
             height: l.rect.h,
         };
-        render_window(frame, l.buf, l.view, rect);
+        let search_match = if l.selected { ed.search_match() } else { None };
+        render_window(frame, l.buf, l.view, rect, search_match);
     }
 
     // --- modeline ----------------------------------------------------------
@@ -319,20 +373,28 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     if rect.height == 0 {
         return None;
     }
-    let line = buf.line_of_point();
-    let row = line as i64 - selected.view.top_line as i64;
-    if row < 0 || row >= rect.height as i64 {
-        return None;
+    // find the cursor's visual row by walking the same wrapped rows that
+    // were rendered
+    let width = rect.width.max(1) as usize;
+    let point = buf.point();
+    let point_line = buf.line_of_point();
+    let point_col = point - buf.rope().line_to_char(point_line);
+    let mut walker = RowWalker::new(buf, width, selected.view.top_row);
+    for i in 0..rect.height as usize {
+        let Some((line_idx, _seg, s, e)) = walker.next_row() else {
+            break;
+        };
+        if line_idx == point_line && point_col >= s && point_col <= e {
+            let vis = wrap::visual_width(buf.line(line_idx).slice(s..point_col));
+            let gutter = if buf.minor_mode_enabled("line-numbers") {
+                GUTTER_WIDTH
+            } else {
+                0
+            };
+            let x = rect.x + gutter + vis.min(rect.width.saturating_sub(1) as usize) as u16;
+            let y = rect.y + i as u16;
+            return Some((x, y));
+        }
     }
-    let line_slice = visible_content(buf.line(line));
-    let col_chars = buf.column().min(line_slice.len_chars());
-    let vis_col = visual_col(line_slice.slice(..col_chars));
-    let gutter = if buf.minor_mode_enabled("line-numbers") {
-        GUTTER_WIDTH
-    } else {
-        0
-    };
-    let x = rect.x + gutter + vis_col.min(rect.width.saturating_sub(1) as usize) as u16;
-    let y = rect.y + row as u16;
-    Some((x, y))
+    None
 }

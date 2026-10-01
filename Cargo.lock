@@ -346,6 +346,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitflags 2.13.1",
+ "memchr",
  "ropey",
 ]
 

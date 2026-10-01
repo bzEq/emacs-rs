@@ -68,6 +68,9 @@ directory, so users can redefine any part of the editor from their
     `M-x revert-buffer` included; toggle with `M-x
     global-auto-revert-mode`
   - CRLF files follow Emacs semantics (`\r\n` acts as a single newline)
+  - Visual line wrapping: long lines word-wrap to the window width
+    (Emacs visual-line-mode); scrolling, the cursor, and the isearch
+    match highlight all follow the wrapped rows
 - **Window system**: `C-x 2/3` splits, `C-x 0/1` deletes, `C-x o` cycles;
   each window keeps its own point and scroll position
 - **Dired**: `C-x d` directory browser — listing, marks (m/u/U), delete

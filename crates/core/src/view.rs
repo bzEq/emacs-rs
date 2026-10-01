@@ -1,10 +1,27 @@
-//! Per-window scroll state. M1 keeps one window per buffer; M2 will split.
+//! Per-window scroll state: the first visible *visual* row (long lines
+//! wrap to several visual rows) plus a cache that makes row computations
+//! O(delta) for typical edits.
 
 use crate::buffer::Buffer;
+use crate::wrap;
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct View {
-    pub top_line: usize,
+    /// First visible visual row (0-based across the whole buffer).
+    pub top_row: usize,
+    /// Cache: the line whose rows-before was last computed.
+    cached_line: usize,
+    cached_rows_before: usize,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        View {
+            top_row: 0,
+            cached_line: usize::MAX,
+            cached_rows_before: 0,
+        }
+    }
 }
 
 impl View {
@@ -12,44 +29,59 @@ impl View {
         Self::default()
     }
 
-    fn clamp(&mut self, buf: &Buffer, height: usize) {
-        let max_top = buf.len_lines().saturating_sub(height);
-        self.top_line = self.top_line.min(max_top);
-    }
-
-    /// Keep the cursor line inside the visible window.
-    pub fn scroll_to_cursor(&mut self, buf: &Buffer, height: usize) {
-        let line = buf.line_of_point();
-        if line < self.top_line {
-            self.top_line = line;
-        } else if line >= self.top_line + height {
-            self.top_line = line + 1 - height;
+    /// Visual rows of the buffer lines before `line`, computed from the
+    /// cached line so typical cursor motion is O(delta).
+    fn rows_before(&mut self, buf: &Buffer, width: usize, line: usize) -> usize {
+        if self.cached_line == usize::MAX {
+            self.cached_rows_before = wrap::rows_between(buf, width, 0, line);
+        } else if line >= self.cached_line {
+            self.cached_rows_before += wrap::rows_between(buf, width, self.cached_line, line);
+        } else {
+            self.cached_rows_before -= wrap::rows_between(buf, width, line, self.cached_line);
         }
-        self.clamp(buf, height);
+        self.cached_line = line;
+        self.cached_rows_before
     }
 
-    /// `scroll-up-command` (C-v): keep cursor on its screen row, show next page.
-    pub fn page_down(&mut self, buf: &mut Buffer, height: usize) {
+    /// Keep the cursor's visual row inside the visible window.
+    pub fn scroll_to_cursor(&mut self, buf: &Buffer, width: usize, height: usize) {
+        let height = height.max(1);
+        let line = buf.line_of_point();
+        let col = buf.column();
+        let rows_before = self.rows_before(buf, width, line);
+        let row = rows_before + wrap::row_in_line(buf.line(line), width, col);
+        if row < self.top_row {
+            self.top_row = row;
+        } else if row >= self.top_row + height {
+            self.top_row = row + 1 - height;
+        }
+    }
+
+    /// `scroll-up-command` (C-v): keep the cursor on its screen row, show
+    /// the next page of visual rows.
+    pub fn page_down(&mut self, buf: &mut Buffer, width: usize, height: usize) {
         let rows = height.saturating_sub(2).max(1);
-        let cursor_row = buf.line_of_point().saturating_sub(self.top_line);
-        self.top_line = self.top_line.saturating_add(rows);
-        self.clamp(buf, height);
-        buf.move_to_line((self.top_line + cursor_row).min(buf.len_lines() - 1));
+        let cursor_row = wrap::row_of_point(buf, width, buf.point()).saturating_sub(self.top_row);
+        self.top_row = self.top_row.saturating_add(rows);
+        let target = self.top_row + cursor_row.min(height.saturating_sub(1));
+        buf.set_point(wrap::pos_at_row(buf, width, target));
+        self.cached_line = usize::MAX;
     }
 
     /// `scroll-down-command` (M-v).
-    pub fn page_up(&mut self, buf: &mut Buffer, height: usize) {
+    pub fn page_up(&mut self, buf: &mut Buffer, width: usize, height: usize) {
         let rows = height.saturating_sub(2).max(1);
-        let cursor_row = buf.line_of_point().saturating_sub(self.top_line);
-        self.top_line = self.top_line.saturating_sub(rows);
-        self.clamp(buf, height);
-        buf.move_to_line((self.top_line + cursor_row).min(buf.len_lines() - 1));
+        let cursor_row = wrap::row_of_point(buf, width, buf.point()).saturating_sub(self.top_row);
+        self.top_row = self.top_row.saturating_sub(rows);
+        let target = self.top_row + cursor_row.min(height.saturating_sub(1));
+        buf.set_point(wrap::pos_at_row(buf, width, target));
+        self.cached_line = usize::MAX;
     }
 
-    /// `recenter` (C-l): center cursor line in the window.
-    pub fn recenter(&mut self, buf: &Buffer, height: usize) {
-        let line = buf.line_of_point();
-        self.top_line = line.saturating_sub(height / 2);
-        self.clamp(buf, height);
+    /// `recenter` (C-l): center the cursor's visual row in the window.
+    pub fn recenter(&mut self, buf: &Buffer, width: usize, height: usize) {
+        let row = wrap::row_of_point(buf, width, buf.point());
+        self.top_row = row.saturating_sub(height / 2);
+        self.cached_line = usize::MAX;
     }
 }

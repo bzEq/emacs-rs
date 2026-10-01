@@ -94,6 +94,41 @@ fn failing_search() {
 }
 
 #[test]
+fn current_match_is_highlighted() {
+    let mut le = LuaEd::new();
+    le.ed.buf_mut().insert("hello world hello");
+    le.ed.buf_mut().move_to_buffer_start();
+    start_search(&mut le, true);
+    le.read_key(Key::plain('h'));
+    assert_eq!(le.ed.search_match(), Some((0, 1)), "match highlighted");
+    le.read_key(Key::plain('e'));
+    assert_eq!(le.ed.search_match(), Some((0, 2)));
+    le.read_key(Key::ctrl('s'));
+    assert_eq!(
+        le.ed.search_match(),
+        Some((12, 14)),
+        "next match highlighted"
+    );
+    // C-g clears the highlight and returns to the start
+    le.read_key(Key::ctrl('g'));
+    assert_eq!(le.ed.search_match(), None, "highlight cleared on abort");
+    assert_eq!(le.point(), 0);
+}
+
+#[test]
+fn failed_search_clears_highlight() {
+    let mut le = LuaEd::new();
+    le.ed.buf_mut().insert("abc");
+    le.ed.buf_mut().move_to_buffer_start();
+    start_search(&mut le, true);
+    le.read_key(Key::plain('a'));
+    assert_eq!(le.ed.search_match(), Some((0, 1)));
+    le.read_key(Key::plain('z')); // "az" fails
+    assert_eq!(le.ed.search_match(), None, "no match: highlight cleared");
+    le.read_key(Key::ctrl('g'));
+}
+
+#[test]
 fn space_appends_to_query() {
     let mut le = LuaEd::new();
     le.ed.buf_mut().insert("hello world");

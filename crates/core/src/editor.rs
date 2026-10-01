@@ -74,6 +74,9 @@ pub struct Editor {
     pending_keymap: Option<KeymapSource>,
     /// The most recent key delivered to a `read-key` coroutine, for replay.
     replay_key: Option<Key>,
+    /// The (start, end) char offsets of the current isearch match, if the
+    /// search is active and found something (highlighted by the UI).
+    search_match: Option<(usize, usize)>,
     /// Set by the Lua isearch layer to replay `replay_key` after exit.
     replay: bool,
 }
@@ -102,6 +105,7 @@ impl Editor {
             minor_defs: std::collections::HashMap::new(),
             pending_keymap: None,
             replay_key: None,
+            search_match: None,
             replay: false,
         }
     }
@@ -280,6 +284,16 @@ impl Editor {
         }
     }
 
+    /// Width of the selected window, for line wrapping and scrolling.
+    pub fn selected_window_width(&self) -> usize {
+        self.window_layout()
+            .into_iter()
+            .find(|l| l.selected)
+            .map(|l| l.rect.w as usize)
+            .unwrap_or(self.window_cols)
+            .max(1)
+    }
+
     /// Height of the selected window, for scrolling commands.
     pub fn selected_window_height(&self) -> usize {
         self.window_layout()
@@ -337,49 +351,65 @@ impl Editor {
         let id = self.windows.selected_buffer();
         let idx = self.buffer_index(id);
         let rows = self.selected_window_height();
+        let cols = self.selected_window_width();
         let buf = &mut self.buffers[idx];
         let w = self.windows.selected_mut();
-        w.view.scroll_to_cursor(buf, rows);
+        w.view.scroll_to_cursor(buf, cols, rows);
     }
 
     pub fn page_down_current(&mut self) {
         let id = self.windows.selected_buffer();
         let idx = self.buffer_index(id);
         let rows = self.selected_window_height();
+        let cols = self.selected_window_width();
         let buf = &mut self.buffers[idx];
         let w = self.windows.selected_mut();
-        w.view.page_down(buf, rows);
+        w.view.page_down(buf, cols, rows);
     }
 
     pub fn page_up_current(&mut self) {
         let id = self.windows.selected_buffer();
         let idx = self.buffer_index(id);
         let rows = self.selected_window_height();
+        let cols = self.selected_window_width();
         let buf = &mut self.buffers[idx];
         let w = self.windows.selected_mut();
-        w.view.page_up(buf, rows);
+        w.view.page_up(buf, cols, rows);
     }
 
     pub fn recenter_current(&mut self) {
         let id = self.windows.selected_buffer();
         let idx = self.buffer_index(id);
         let rows = self.selected_window_height();
+        let cols = self.selected_window_width();
         let buf = &self.buffers[idx];
         let w = self.windows.selected_mut();
-        w.view.recenter(buf, rows);
+        w.view.recenter(buf, cols, rows);
     }
 
     // --- search ------------------------------------------------------------
 
-    /// Case-insensitive match of `query` at or after `from`, in char
-    /// offsets (used by the Lua isearch implementation).
-    pub fn search_forward(&self, query: &str, from: usize) -> Option<usize> {
+    /// Case-insensitive match of `query` at or after `from`; returns the
+    /// (start, end) char offsets of the match (used by the Lua isearch
+    /// implementation, which highlights the current match).
+    pub fn search_forward(&self, query: &str, from: usize) -> Option<(usize, usize)> {
         crate::search::find_forward(self.buf().rope(), query, from)
     }
 
-    /// Case-insensitive match of `query` strictly before `from`.
-    pub fn search_backward(&self, query: &str, from: usize) -> Option<usize> {
+    /// Case-insensitive match of `query` strictly before `from`; returns
+    /// the (start, end) char offsets of the match.
+    pub fn search_backward(&self, query: &str, from: usize) -> Option<(usize, usize)> {
         crate::search::find_backward(self.buf().rope(), query, from)
+    }
+
+    /// The current isearch match to highlight (set/cleared by the Lua
+    /// isearch implementation).
+    pub fn search_match(&self) -> Option<(usize, usize)> {
+        self.search_match
+    }
+
+    pub fn set_search_match(&mut self, m: Option<(usize, usize)>) {
+        self.search_match = m;
     }
 
     // --- keymap / bindings -------------------------------------------------
@@ -1038,8 +1068,8 @@ mod tests {
     fn search_forward_uses_rope() {
         let mut ed = Editor::new(20, 80);
         ed.buf_mut().insert("hello world hello");
-        assert_eq!(ed.search_forward("hello", 0), Some(0));
-        assert_eq!(ed.search_forward("hello", 1), Some(12));
-        assert_eq!(ed.search_backward("hello", 11), Some(0));
+        assert_eq!(ed.search_forward("hello", 0), Some((0, 5)));
+        assert_eq!(ed.search_forward("hello", 1), Some((12, 17)));
+        assert_eq!(ed.search_backward("hello", 11), Some((0, 5)));
     }
 }

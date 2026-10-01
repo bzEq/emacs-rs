@@ -20,7 +20,8 @@ fn main() {
             gen(path, mb);
         }
         Some("load") => load(Path::new(&args[2])),
-        _ => eprintln!("usage: bench gen <path> <mb> | bench load <path>"),
+        Some("search") => search(Path::new(&args[2])),
+        _ => eprintln!("usage: bench gen <path> <mb> | bench load <path> | bench search <path>"),
     }
 }
 
@@ -83,4 +84,40 @@ fn load(path: &Path) {
     }
     println!("100k deletes: {:?}", t.elapsed());
     assert_eq!(buf.len_chars(), orig_len);
+}
+
+fn search(path: &Path) {
+    use emacs_core::search::{find_backward, find_forward};
+    let file = File::open(path).unwrap();
+    let buf = Buffer::from_reader("bench", file).unwrap();
+    let rope = buf.rope();
+    let len = rope.len_chars();
+    let mb = len as f64 / 1e6;
+    println!("searching {mb:.0} MB of chars");
+
+    let t = Instant::now();
+    let mut hits = 0usize;
+    for i in 0..200 {
+        let from = (i * 97) % len;
+        if find_forward(rope, "padding", from).is_some() {
+            hits += 1;
+        }
+    }
+    println!(
+        "200 x find_forward('padding'): {:?} ({hits} hits)",
+        t.elapsed()
+    );
+
+    let t = Instant::now();
+    let mut hits = 0usize;
+    for i in 0..200 {
+        let from = len / 2 + (i * 97) % (len / 2);
+        if find_backward(rope, "padding", from).is_some() {
+            hits += 1;
+        }
+    }
+    println!(
+        "200 x find_backward('padding'): {:?} ({hits} hits)",
+        t.elapsed()
+    );
 }
