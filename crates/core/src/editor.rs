@@ -259,6 +259,11 @@ impl Editor {
 
     // --- windows -----------------------------------------------------------
 
+    /// The divider lines between split windows (window boundaries).
+    pub fn window_dividers(&self) -> Vec<crate::window::Divider> {
+        self.windows.dividers(self.body_rect())
+    }
+
     pub fn window_layout(&self) -> Vec<WindowLayout<'_>> {
         let body = self.body_rect();
         let selected = self.windows.selected_path().to_vec();

@@ -264,32 +264,7 @@ impl WindowTree {
             match node {
                 Node::Leaf(w) => out.push((path.clone(), w, area)),
                 Node::Pair(split, a, b) => {
-                    let (ra, rb) = match split {
-                        Split::Vertical => {
-                            let h1 = area.h / 2;
-                            let h2 = area.h - h1;
-                            (
-                                Rect { h: h1, ..area },
-                                Rect {
-                                    y: area.y + h1,
-                                    h: h2,
-                                    ..area
-                                },
-                            )
-                        }
-                        Split::Horizontal => {
-                            let w1 = area.w / 2;
-                            let w2 = area.w - w1;
-                            (
-                                Rect { w: w1, ..area },
-                                Rect {
-                                    x: area.x + w1,
-                                    w: w2,
-                                    ..area
-                                },
-                            )
-                        }
-                    };
+                    let (ra, rb) = split_area(*split, area);
                     path.push(0);
                     walk(a, path, ra, out);
                     *path.last_mut().unwrap() = 1;
@@ -300,6 +275,75 @@ impl WindowTree {
         }
         walk(&self.root, &mut Vec::new(), area, &mut out);
         out
+    }
+
+    /// The divider lines between every pair of split windows (window
+    /// boundaries, drawn by the UI).
+    pub fn dividers(&self, area: Rect) -> Vec<Divider> {
+        let mut out = Vec::new();
+        fn walk(node: &Node, area: Rect, out: &mut Vec<Divider>) {
+            if let Node::Pair(split, a, b) = node {
+                let (ra, rb) = split_area(*split, area);
+                out.push(match split {
+                    Split::Vertical => Divider {
+                        x: area.x,
+                        y: ra.y + ra.h,
+                        w: area.w,
+                        h: 1,
+                    },
+                    Split::Horizontal => Divider {
+                        x: ra.x + ra.w,
+                        y: area.y,
+                        w: 1,
+                        h: area.h,
+                    },
+                });
+                walk(a, ra, out);
+                walk(b, rb, out);
+            }
+        }
+        walk(&self.root, area, &mut out);
+        out
+    }
+}
+
+/// A window divider segment (1 cell thick).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Divider {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// Split `area` into the two child areas of a pair, reserving one cell
+/// for the divider between them.
+pub fn split_area(split: Split, area: Rect) -> (Rect, Rect) {
+    match split {
+        Split::Vertical => {
+            let h1 = area.h / 2;
+            let h2 = area.h.saturating_sub(h1 + 1);
+            (
+                Rect { h: h1, ..area },
+                Rect {
+                    y: area.y + h1 + 1,
+                    h: h2,
+                    ..area
+                },
+            )
+        }
+        Split::Horizontal => {
+            let w1 = area.w / 2;
+            let w2 = area.w.saturating_sub(w1 + 1);
+            (
+                Rect { w: w1, ..area },
+                Rect {
+                    x: area.x + w1 + 1,
+                    w: w2,
+                    ..area
+                },
+            )
+        }
     }
 }
 
@@ -320,7 +364,7 @@ mod tests {
         };
         let l = t.layout(area);
         assert_eq!(l.len(), 3);
-        // bottom window is horizontal-split
+        // bottom window is horizontal-split; dividers take one cell
         assert_eq!(
             l[0].2,
             Rect {
@@ -334,19 +378,38 @@ mod tests {
             l[1].2,
             Rect {
                 x: 0,
-                y: 25,
+                y: 26,
                 w: 50,
-                h: 25
+                h: 24
             }
         );
         assert_eq!(
             l[2].2,
             Rect {
-                x: 50,
-                y: 25,
-                w: 50,
-                h: 25
+                x: 51,
+                y: 26,
+                w: 49,
+                h: 24
             }
+        );
+        // the dividers sit between the panes
+        let divs = t.dividers(area);
+        assert_eq!(
+            divs,
+            vec![
+                Divider {
+                    x: 0,
+                    y: 25,
+                    w: 100,
+                    h: 1
+                },
+                Divider {
+                    x: 50,
+                    y: 26,
+                    w: 1,
+                    h: 24
+                },
+            ]
         );
     }
 

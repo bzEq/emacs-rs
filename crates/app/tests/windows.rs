@@ -34,6 +34,33 @@ fn split_scroll_then_switch_buffer_renders_new_buffer() {
 }
 
 #[test]
+fn window_dividers_are_drawn() {
+    let em = Em::spawn();
+    let content: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let path = write_file(&em.scratch, "t.txt", &content);
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("line 0", 5000));
+    em.keys(b"\x18\x00"); // C-x 2: stacked split
+    assert!(em.wait_for("line 0", 3000));
+    em.drain();
+    // the horizontal divider between the panes ("─" = U+2500)
+    assert!(
+        em.raw_contains("\u{2500}".as_bytes()),
+        "horizontal divider drawn between stacked panes"
+    );
+    em.keys(b"\x18\x1b"); // C-x 3: side-by-side split
+    assert!(em.wait_for("line 0", 3000));
+    em.drain();
+    // the vertical divider ("│" = U+2502)
+    assert!(
+        em.raw_contains("\u{2502}".as_bytes()),
+        "vertical divider drawn between side-by-side panes"
+    );
+    em.quit();
+}
+
+#[test]
 fn split_vertical_shows_two_panes() {
     let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "hello world\n");

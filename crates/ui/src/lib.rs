@@ -286,6 +286,31 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         render_window(frame, l.buf, l.view, rect, search_match);
     }
 
+    // --- window dividers (boundaries between split windows) ----------------
+    let divider_style = Style::default().fg(Color::DarkGray);
+    for d in ed.window_dividers() {
+        let rect = Rect {
+            x: d.x,
+            y: d.y,
+            width: d.w,
+            height: d.h,
+        };
+        if rect.width == 1 {
+            let lines: Vec<TuiLine> = (0..rect.height)
+                .map(|_| TuiLine::styled("│", divider_style))
+                .collect();
+            frame.render_widget(Paragraph::new(lines), rect);
+        } else if rect.height == 1 {
+            frame.render_widget(
+                Paragraph::new(TuiLine::styled(
+                    "─".repeat(rect.width as usize),
+                    divider_style,
+                )),
+                rect,
+            );
+        }
+    }
+
     // --- modeline ----------------------------------------------------------
     let ml_style = Style::default()
         .fg(Color::Black)
