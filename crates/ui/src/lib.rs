@@ -93,7 +93,8 @@ fn render_window(
         lines.push(render_segment(buf, line_idx, s, e, region, search_match));
     }
     if let Some((line, seg)) = first {
-        view.hint.set((view.top_row, line, seg, buf.len_chars()));
+        view.hint
+            .set((view.top_row, line, seg, buf.len_chars(), width));
     }
     if line_numbers && gutter_w > 0 && rect.width > gutter_w {
         let gutter = Rect {

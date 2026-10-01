@@ -5,6 +5,35 @@ mod common;
 use common::{write_file, Em};
 
 #[test]
+fn split_scroll_then_switch_buffer_renders_new_buffer() {
+    // C-x 3, page down several times, then find-file a directory: the
+    // dired listing must render in the selected window (the scroll state
+    // belongs to the previous buffer and must reset on switch)
+    let em = Em::spawn();
+    let content: String = (0..80).map(|i| format!("line {i}\n")).collect();
+    let path = write_file(&em.scratch, "t.txt", &content);
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("line 0", 5000));
+    let dir = em.scratch.join("work");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("alpha.txt"), "a").unwrap();
+    em.keys(b"\x18\x1b"); // C-x 3
+    assert!(em.wait_for("L1 C0", 3000));
+    em.keys(b"\x16\x16\x16\x16"); // C-v x4
+    assert!(em.wait_for("L8", 3000), "scrolled down in the split window");
+    em.keys(b"\x18\x06"); // C-x C-f
+    em.type_str(&dir.display().to_string());
+    em.keys(b"\r");
+    assert!(
+        em.wait_for("alpha.txt", 5000),
+        "dired listing rendered after switching buffers"
+    );
+    assert!(em.wait_for("(dired-mode)", 3000), "dired-mode active");
+    em.quit();
+}
+
+#[test]
 fn split_vertical_shows_two_panes() {
     let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "hello world\n");

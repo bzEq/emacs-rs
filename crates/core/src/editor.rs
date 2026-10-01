@@ -168,7 +168,8 @@ impl Editor {
         self.buffer_index(id)
     }
 
-    /// Show `id` in the selected window, preserving window-points.
+    /// Show `id` in the selected window, preserving window-points. The
+    /// window's scroll state is reset: it belonged to the previous buffer.
     pub fn set_selected_buffer(&mut self, id: usize) {
         let old_id = self.windows.selected_buffer();
         if old_id == id {
@@ -180,6 +181,7 @@ impl Editor {
         let w = self.windows.selected_mut();
         w.point = Some(point);
         w.buffer = id;
+        w.view.reset();
         let saved = w.point.take();
         if let Some(p) = saved {
             self.buffers[new_idx].set_point(p);

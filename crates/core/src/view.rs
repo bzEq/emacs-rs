@@ -14,10 +14,11 @@ pub struct View {
     /// Cache: the line whose rows-before was last computed.
     cached_line: usize,
     cached_rows_before: usize,
-    /// Render hint: the (row, line, segment, buffer length) of the last
-    /// rendered first row, so the renderer can skip to it in O(delta)
-    /// instead of walking every line from the top on each frame.
-    pub hint: Cell<(usize, usize, usize, usize)>,
+    /// Render hint: the (row, line, segment, buffer length, width) of the
+    /// last rendered first row, so the renderer can skip to it in O(delta)
+    /// instead of walking every line from the top on each frame. The
+    /// buffer length and width invalidate the hint when they change.
+    pub hint: Cell<(usize, usize, usize, usize, usize)>,
 }
 
 impl Default for View {
@@ -26,7 +27,7 @@ impl Default for View {
             top_row: 0,
             cached_line: usize::MAX,
             cached_rows_before: 0,
-            hint: Cell::new((0, 0, 0, usize::MAX)),
+            hint: Cell::new((0, 0, 0, usize::MAX, 0)),
         }
     }
 }
@@ -37,7 +38,7 @@ impl Clone for View {
             top_row: self.top_row,
             cached_line: self.cached_line,
             cached_rows_before: self.cached_rows_before,
-            hint: Cell::new((0, 0, 0, usize::MAX)),
+            hint: Cell::new((0, 0, 0, usize::MAX, 0)),
         }
     }
 }
@@ -45,6 +46,16 @@ impl Clone for View {
 impl View {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reset the scroll position and caches: called when the window
+    /// switches to a different buffer (the scroll state belongs to the
+    /// previous buffer).
+    pub fn reset(&mut self) {
+        self.top_row = 0;
+        self.cached_line = usize::MAX;
+        self.cached_rows_before = 0;
+        self.hint = Cell::new((0, 0, 0, usize::MAX, 0));
     }
 
     /// Visual rows of the buffer lines before `line`, computed from the
