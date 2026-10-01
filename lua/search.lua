@@ -62,6 +62,17 @@ function isearch.run(forward)
 
   local special = { RET = true, TAB = true, DEL = true, ESC = true, SPC = true }
 
+  -- A key is printable text unless it is a named key, a modifier combo
+  -- ("C-x", "M--", ...), or an angle-bracket key name ("<left>", ...).
+  -- A bare "-" or "<" is an ordinary character (LuaJIT patterns have no
+  -- alternation, hence the explicit checks).
+  local function is_printable(key)
+    if special[key] then return false end
+    if key ~= "-" and key:find("-", 1, true) then return false end
+    if key:sub(1, 1) == "<" and key:sub(-1) == ">" then return false end
+    return true
+  end
+
   -- show the prompt immediately, before waiting for the first key
   -- (Emacs shows "I-search:" as soon as C-s is pressed)
   emacs.message(prompt())
@@ -121,7 +132,7 @@ function isearch.run(forward)
       matched = nil
       step(true)
       emacs.message(prompt())
-    elseif not special[key] and not key:find("-", 1, true) and not key:find("<", 1, true) then
+    elseif is_printable(key) then
       -- a printable character (possibly multibyte)
       query = query .. key
       matched = nil

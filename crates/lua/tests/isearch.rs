@@ -144,3 +144,21 @@ fn space_appends_to_query() {
     assert_eq!(le.point(), 0, "matched the full phrase including the space");
     le.read_key(Key::ctrl('g'));
 }
+
+#[test]
+fn dash_and_angle_bracket_are_literal() {
+    let mut le = LuaEd::new();
+    le.ed.buf_mut().insert("a-b <c>");
+    le.ed.buf_mut().move_to_buffer_start();
+    start_search(&mut le, true);
+    le.read_key(Key::plain('a'));
+    assert!(le.read_key(Key::plain('-')), "'-' extends the query");
+    le.read_key(Key::plain('b'));
+    assert_eq!(le.ed.search_match(), Some((0, 3)), "matched \"a-b\"");
+    assert!(le.read_key(Key::plain(' ')), "space extends the query");
+    assert!(le.read_key(Key::plain('<')), "'<' extends the query");
+    le.read_key(Key::plain('c'));
+    assert_eq!(le.ed.search_match(), Some((0, 6)), "matched \"a-b <c\"");
+    assert_eq!(le.point(), 0);
+    le.read_key(Key::ctrl('g'));
+}
