@@ -97,7 +97,11 @@ impl LuaEd {
             matches!(self.ed.pending(), Some(PendingRequest::ReadString { .. })),
             "no read-string request pending"
         );
-        self.resume(ResumeValue::String(Some(input.to_string())));
+        let outcome = self
+            .ed
+            .resume_pending(ResumeValue::String(Some(input.to_string())))
+            .expect("resume");
+        assert!(self.ed.finish_command(outcome).is_none());
         matches!(self.ed.pending(), Some(PendingRequest::ReadString { .. }))
     }
 
@@ -108,7 +112,11 @@ impl LuaEd {
             matches!(self.ed.pending(), Some(PendingRequest::ReadYesNo { .. })),
             "no yes/no request pending"
         );
-        self.resume(ResumeValue::Bool(Some(yes)));
+        let outcome = self
+            .ed
+            .resume_pending(ResumeValue::Bool(Some(yes)))
+            .expect("resume");
+        assert!(self.ed.finish_command(outcome).is_none());
         matches!(self.ed.pending(), Some(PendingRequest::ReadYesNo { .. }))
     }
 
@@ -120,25 +128,22 @@ impl LuaEd {
             "no read-key request pending"
         );
         self.ed.set_read_key(key);
-        self.resume(ResumeValue::Key(key));
+        let outcome = self
+            .ed
+            .resume_pending(ResumeValue::Key(key))
+            .expect("resume");
+        assert!(self.ed.finish_command(outcome).is_none());
         matches!(self.ed.pending(), Some(PendingRequest::ReadKey))
-    }
-
-    /// Resume the pending request, apply the outcome, and restore any outer
-    /// read the resumed command interrupted (mirrors the app's `resume`).
-    pub fn resume(&mut self, value: ResumeValue) {
-        let res = self.ed.resume_pending(value).expect("resume");
-        assert!(self.ed.finish_command(res.outcome).is_none());
-        if let Some(restore) = res.restore {
-            self.ed
-                .restore_pending_read(restore.request, restore.minibuffer);
-        }
     }
 
     /// Abort all pending input (C-g semantics).
     pub fn abort(&mut self) {
         while self.ed.pending().is_some() {
-            self.resume(ResumeValue::String(None));
+            let outcome = self
+                .ed
+                .resume_pending(ResumeValue::String(None))
+                .expect("resume");
+            assert!(self.ed.finish_command(outcome).is_none());
         }
     }
 

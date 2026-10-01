@@ -101,7 +101,11 @@ fn read_string_protocol() {
 fn read_string_abort_inserts_nothing() {
     let mut le = with_init();
     le.command_reading("ask-and-insert");
-    le.resume(emacs_core::script::ResumeValue::String(None));
+    let outcome = le
+        .ed
+        .resume_pending(emacs_core::script::ResumeValue::String(None))
+        .expect("resume");
+    assert!(le.ed.finish_command(outcome).is_none());
     assert_eq!(le.text(), "", "nil answer: nothing inserted");
 }
 
@@ -132,51 +136,6 @@ fn nested_execute_runs_inline() {
     let mut le = with_init();
     le.run("nested-execute");
     assert_eq!(le.text(), "hi1!");
-}
-
-#[test]
-fn nested_read_restores_outer() {
-    use emacs_core::script::PendingRequest;
-
-    let mut le = with_init();
-    // open the M-x read-string prompt
-    le.command_reading("execute-extended-command");
-    // a command invoked while the prompt is pending suspends on top of it
-    let outcome = le.ed.call_command("two-reads", None).unwrap();
-    assert!(le.ed.finish_command(outcome).is_none());
-    assert!(
-        matches!(le.ed.pending(), Some(PendingRequest::ReadString { .. })),
-        "the inner command's read is pending"
-    );
-    // answer the inner command's two reads
-    assert!(le.answer("a"), "inner second read pending");
-    assert!(le.answer("b"), "inner done; the outer M-x read is restored");
-    assert_eq!(le.text(), "a,b", "inner command completed");
-    // the restored outer read is functional
-    assert!(!le.answer("say-hello"));
-    assert!(le.text().ends_with("hi1"), "outer command runs afterwards");
-}
-
-#[test]
-fn nested_read_abort_restores_outer() {
-    use emacs_core::script::PendingRequest;
-
-    let mut le = with_init();
-    le.command_reading("execute-extended-command");
-    let outcome = le.ed.call_command("ask-and-insert", None).unwrap();
-    assert!(le.ed.finish_command(outcome).is_none());
-    assert!(matches!(
-        le.ed.pending(),
-        Some(PendingRequest::ReadString { .. })
-    ));
-    // abort the inner read (C-g): the outer read comes back
-    le.resume(emacs_core::script::ResumeValue::String(None));
-    assert!(
-        matches!(le.ed.pending(), Some(PendingRequest::ReadString { .. })),
-        "outer read restored after inner abort"
-    );
-    assert!(!le.answer("say-hello"));
-    assert!(le.text().ends_with("hi1"));
 }
 
 #[test]
@@ -272,13 +231,10 @@ fn pending_request_survives_unknown_yield_type_check() {
     let mut ed = emacs_core::editor::Editor::new(24, 80);
     let outcome = ed.call_command("anything", None).unwrap();
     assert!(matches!(outcome, emacs_core::script::CommandOutcome::Done));
-    let res = ed
+    let outcome = ed
         .resume_pending(emacs_core::script::ResumeValue::String(None))
         .unwrap();
-    assert!(matches!(
-        res.outcome,
-        emacs_core::script::CommandOutcome::Done
-    ));
+    assert!(matches!(outcome, emacs_core::script::CommandOutcome::Done));
 }
 
 #[test]

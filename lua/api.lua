@@ -9,7 +9,6 @@ M.command_docs = {}
 M.hooks = {}
 M.mode_indent = {}   -- major mode name -> indentation unit in spaces
 M.undo_lists = {}    -- buffer id -> undo entries
-M.command_boundaries = {} -- buffer id -> boundary written for this command
 M.kill_ring = { entries = {}, current = 0 }
 M.prefix = { digits = nil, negative = false, universal = 0 }
 M.last_yank = nil
@@ -44,34 +43,17 @@ local function undo_boundary(id)
 end
 
 local function record_undo(id, entry)
-  -- the first edit of a command in a buffer starts a new undo group there,
-  -- even when the command switched buffers mid-way
-  if not M.command_boundaries[id] then
-    undo_boundary(id)
-    M.command_boundaries[id] = true
-  end
   undo_list(id)[#undo_list(id) + 1] = entry
-end
-
--- Editing commands must not modify a read-only buffer (*Help*, dired).
--- dired maintains its listing with the raw primitives, which is why this
--- check lives in the `emacs` wrappers and not in the Rust core.
-local function check_read_only()
-  if raw.read_only() then
-    error("Buffer is read-only")
-  end
 end
 
 function emacs.insert(text)
   if text == nil or text == "" then return end
-  check_read_only()
   local pos = raw.point()
   raw.insert(text)
   record_undo(raw.id(), { t = "insert", pos = pos, len = raw.point() - pos })
 end
 
 function emacs.delete_range(a, b)
-  check_read_only()
   local id = raw.id()
   local text = raw.delete_range(a, b)
   if text ~= "" then
@@ -139,10 +121,7 @@ function M.kill(text)
   if text == nil or text == "" then return end
   local append = is_kill_command(M.last_command)
   local kr = M.kill_ring
-  -- append only to the entry yank would return next; after yank-pop moved
-  -- the ring back, a new kill starts a fresh entry instead of corrupting
-  -- an older one
-  if append and kr.current == #kr.entries and kr.entries[kr.current] then
+  if append and kr.entries[kr.current] then
     kr.entries[kr.current] = kr.entries[kr.current] .. text
   else
     kr.entries[#kr.entries + 1] = text
@@ -168,38 +147,13 @@ function emacs.kill(text)
   M.kill(text)
 end
 
--- Yank the current kill at point, recording `last_yank` so yank-pop can
--- replace exactly this text. Shared by the yank command and emacs.yank.
-function M.yank_current(prefix)
-  local t = M.current_kill()
-  if not t then return false end
-  local pos = raw.point()
-  for _ = 1, math.max(prefix or 1, 1) do
-    emacs.insert(t)
-  end
-  M.last_yank = {
-    id = raw.id(),
-    pos = pos,
-    len = raw.point() - pos,
-    text = raw.get_text(pos, raw.point()),
-  }
-  return true
-end
-
--- Drop the per-buffer state of a killed buffer (undo history, dired
--- state, yank bookkeeping).
-function M.cleanup_buffer(id)
-  M.undo_lists[id] = nil
-  M.dired[id] = nil
-  if M.last_yank and M.last_yank.id == id then
-    M.last_yank = nil
-  end
-end
-
 function emacs.yank()
-  if not M.yank_current(1) then
+  local t = M.current_kill()
+  if not t then
     emacs.error("Kill ring is empty")
+    return
   end
+  emacs.insert(t)
 end
 
 -- ---- prefix arguments ------------------------------------------------------
@@ -233,7 +187,6 @@ function M.run_command(name, extra)
     return
   end
   if M.last_command ~= name then
-    M.command_boundaries = {}
     undo_boundary(raw.id())
   end
   M.last_command = M.this_command
@@ -257,13 +210,6 @@ end
 
 function emacs.define_command(name, fn)
   M.define(name, fn)
-end
-
--- Run a command by name from Lua. Unlike the keymap dispatch this runs in
--- the *current* coroutine, so commands that need input yield to the event
--- loop exactly like the command that called them.
-function emacs.execute(name)
-  M.run_command(name, nil)
 end
 
 -- ---- synchronous reads (coroutine yields) ----------------------------------

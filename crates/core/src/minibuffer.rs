@@ -1,22 +1,21 @@
-//! Minibuffer state: the input is a real rope `Buffer` (Emacs's model —
-//! while the minibuffer is active, the input is the current buffer, so
-//! global keybindings and editing commands operate on it). Completion
-//! candidates come from the scripting host (Lua); this module also holds
-//! the preview/cycle display state.
-
-use crate::buffer::Buffer;
+//! Minibuffer state: an input line with optional completion display.
+//! Completion candidates are computed by the scripting host (Lua); this
+//! module only holds the input editing and preview/cycle display state.
+//!
+//! `cursor` is a *byte* offset into `input` (always on a char boundary),
+//! so editing is correct for multibyte (UTF-8) input.
 
 #[derive(Debug, Clone)]
 pub struct Minibuffer {
     pub prompt: String,
-    /// The input line, as a buffer (point = the input cursor).
-    buffer: Buffer,
+    pub input: String,
+    pub cursor: usize,
     /// Whether completion is active (candidates come from the script host).
     pub completion: bool,
     /// The pre-filled input (find-file's default directory); typing `/`
     /// while the input is still exactly this replaces it (Emacs
     /// file-name-shadow).
-    pub initial: String,
+    pub initial: Option<String>,
     /// Current completion candidates (after the last Tab), for display.
     pub candidates: Vec<String>,
     pub cycle: usize,
@@ -29,17 +28,31 @@ pub struct Minibuffer {
     pub preview: String,
 }
 
+fn prev_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx - 1;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn next_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx + 1;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 impl Minibuffer {
     pub fn new(prompt: String, completion: bool, initial: Option<String>) -> Self {
-        let initial = initial.filter(|i| !i.is_empty()).unwrap_or_default();
-        let mut buffer = Buffer::new("*minibuffer*");
-        if !initial.is_empty() {
-            buffer.insert(&initial);
-            buffer.move_to_buffer_end();
-        }
+        let initial = initial.filter(|i| !i.is_empty());
+        let cursor = initial.as_ref().map(|i| i.len()).unwrap_or(0);
+        let input = initial.clone().unwrap_or_default();
         Minibuffer {
             prompt,
-            buffer,
+            input,
+            cursor,
             completion,
             initial,
             candidates: Vec::new(),
@@ -49,83 +62,83 @@ impl Minibuffer {
         }
     }
 
-    pub fn buffer(&self) -> &Buffer {
-        &self.buffer
-    }
-
-    pub fn buffer_mut(&mut self) -> &mut Buffer {
-        &mut self.buffer
-    }
-
-    /// The input text.
-    pub fn input(&self) -> String {
-        self.buffer.rope().to_string()
-    }
-
-    /// The input text that RET accepts: the input plus the completion
-    /// preview.
-    pub fn accepted(&self) -> String {
-        let mut s = self.input();
-        s.push_str(&self.preview);
-        s
-    }
-
-    /// Display column of the input cursor (chars before point).
-    pub fn cursor_col(&self) -> usize {
-        self.buffer
-            .rope()
-            .slice(..self.buffer.point())
-            .chars()
-            .count()
-    }
-
     pub fn insert_char(&mut self, c: char) {
         // file-name-shadow: typing `/` over an untouched initial input
         // replaces it, so absolute paths work without manual clearing
         if c == '/'
-            && !self.initial.is_empty()
-            && self.buffer.rope().to_string() == self.initial
-            && self.buffer.point() == self.initial.len()
+            && self.initial.as_deref() == Some(self.input.as_str())
+            && self.cursor == self.input.len()
         {
-            self.buffer.delete_range(0, self.buffer.len_chars());
-            self.buffer.insert_char('/');
+            self.input = "/".into();
+            self.cursor = 1;
             self.preview.clear();
             self.candidates.clear();
             return;
         }
         // if the typed char matches the preview, consume one preview char
-        if self.preview.starts_with(c) && self.buffer.point() == self.buffer.len_chars() {
-            self.buffer.insert_char(c);
+        if self.preview.starts_with(c) && self.cursor == self.input.len() {
+            self.input.push(c);
+            self.cursor += c.len_utf8();
             self.preview = self.preview[c.len_utf8()..].to_string();
         } else {
-            self.buffer.insert_char(c);
+            self.input.insert(self.cursor, c);
+            self.cursor += c.len_utf8();
             self.preview.clear();
         }
         self.candidates.clear();
     }
 
     pub fn delete_backward(&mut self) {
-        self.buffer.delete_backward();
+        if self.cursor > 0 {
+            let prev = prev_char_boundary(&self.input, self.cursor);
+            self.input.remove(prev);
+            self.cursor = prev;
+        }
         self.preview.clear();
         self.candidates.clear();
     }
 
     pub fn delete_forward(&mut self) {
-        self.buffer.delete_forward();
+        if self.cursor < self.input.len() {
+            self.input.remove(self.cursor);
+        }
         self.preview.clear();
         self.candidates.clear();
     }
 
-    /// Replace the whole input (history recall), point at the end.
-    pub fn set_input(&mut self, text: &str) {
-        let len = self.buffer.len_chars();
-        if len > 0 {
-            let _ = self.buffer.delete_range(0, len);
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor = prev_char_boundary(&self.input, self.cursor);
         }
-        self.buffer.insert(text);
-        self.buffer.move_to_buffer_end();
+    }
+
+    pub fn move_right(&mut self) {
+        if self.cursor < self.input.len() {
+            self.cursor = next_char_boundary(&self.input, self.cursor);
+        }
+    }
+
+    pub fn to_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn to_end(&mut self) {
+        self.cursor = self.input.len();
+    }
+
+    /// Kill from the cursor to the end of the input (C-k).
+    pub fn kill_line(&mut self) {
+        self.input.truncate(self.cursor);
         self.preview.clear();
         self.candidates.clear();
+    }
+
+    /// The text that RET accepts: the typed input plus the completion
+    /// preview.
+    pub fn accepted(&self) -> String {
+        let mut s = self.input.clone();
+        s.push_str(&self.preview);
+        s
     }
 
     /// Store candidates for display and, if `fill` is set, compute the
@@ -145,15 +158,14 @@ impl Minibuffer {
             self.candidates.clear();
             return;
         }
-        if fill && self.buffer.point() == self.buffer.len_chars() {
-            let input = self.input();
+        if fill && self.cursor == self.input.len() {
             // preview = LCP of the candidates (full name if unique)
             let mut lcp: &str = &candidates[0];
             for c in &candidates[1..] {
                 lcp = common_prefix(lcp, c);
             }
-            if lcp.len() > input.len() && lcp.starts_with(&input) {
-                self.preview = lcp[input.len()..].to_string();
+            if lcp.len() > self.input.len() && lcp.starts_with(&self.input) {
+                self.preview = lcp[self.input.len()..].to_string();
             }
         }
         self.candidates = candidates;
@@ -162,8 +174,8 @@ impl Minibuffer {
     /// Fold the preview into the input (TAB or RET).
     pub fn accept_preview(&mut self) {
         if !self.preview.is_empty() {
-            self.buffer.insert(&self.preview);
-            self.buffer.move_to_buffer_end();
+            self.input.push_str(&self.preview);
+            self.cursor = self.input.len();
             self.preview.clear();
         }
     }
@@ -176,7 +188,9 @@ impl Minibuffer {
             return false;
         }
         self.cycle = self.cycle.wrapping_add(1) % self.candidates.len();
-        self.set_input(&self.candidates[self.cycle].clone());
+        self.input = self.candidates[self.cycle].clone();
+        self.cursor = self.input.len();
+        self.preview.clear();
         true
     }
 }
@@ -208,68 +222,68 @@ mod tests {
         let mut mb = Minibuffer::new("M-x ".into(), false, None);
         mb.insert_char('a');
         mb.insert_char('b');
-        mb.buffer_mut().move_char(crate::buffer::Direction::Backward);
+        mb.move_left();
         mb.insert_char('X');
-        assert_eq!(mb.input(), "aXb");
+        assert_eq!(mb.input, "aXb");
         mb.delete_backward();
-        assert_eq!(mb.input(), "ab");
-        assert_eq!(mb.buffer().point(), 1);
-    }
-
-    #[test]
-    fn multibyte_editing() {
-        let mut mb = Minibuffer::new(String::new(), false, None);
-        mb.insert_char('中');
-        mb.insert_char('文');
-        mb.insert_char('x');
-        assert_eq!(mb.input(), "中文x");
-        // backspace removes the whole 'x', then whole chars
-        mb.delete_backward();
-        assert_eq!(mb.input(), "中文");
-        mb.delete_backward();
-        assert_eq!(mb.input(), "中");
-        mb.insert_char('y');
-        assert_eq!(mb.input(), "中y");
-        // delete-forward at the start removes the whole first char
-        mb.buffer_mut().move_to_buffer_start();
-        mb.delete_forward();
-        assert_eq!(mb.input(), "y");
-    }
-
-    #[test]
-    fn multibyte_cursor_motion() {
-        let mut mb = Minibuffer::new(String::new(), false, None);
-        mb.insert_char('中');
-        mb.insert_char('文');
-        mb.buffer_mut().move_char(crate::buffer::Direction::Backward);
-        mb.insert_char('x');
-        assert_eq!(mb.input(), "中x文");
-        mb.buffer_mut().move_char(crate::buffer::Direction::Forward);
-        mb.buffer_mut().move_char(crate::buffer::Direction::Forward);
-        mb.insert_char('y');
-        assert_eq!(mb.input(), "中x文y");
+        assert_eq!(mb.input, "ab");
+        assert_eq!(mb.cursor, 1);
     }
 
     #[test]
     fn initial_input_and_file_name_shadow() {
         let mut mb = Minibuffer::new("Find file: ".into(), true, Some("/home/user/".into()));
-        assert_eq!(mb.input(), "/home/user/");
-        assert_eq!(mb.buffer().point(), 11, "point at the end of the initial input");
+        assert_eq!(mb.input, "/home/user/");
+        assert_eq!(mb.cursor, 11, "cursor at the end of the initial input");
         // motion over the pre-filled input
-        mb.buffer_mut().move_char(crate::buffer::Direction::Backward);
-        assert_eq!(mb.buffer().point(), 10);
-        mb.buffer_mut().move_char(crate::buffer::Direction::Forward);
-        assert_eq!(mb.buffer().point(), 11);
+        mb.move_left();
+        assert_eq!(mb.cursor, 10);
+        mb.move_right();
+        assert_eq!(mb.cursor, 11);
         // typing a relative name appends
         mb.insert_char('h');
-        assert_eq!(mb.input(), "/home/user/h");
+        assert_eq!(mb.input, "/home/user/h");
         // but typing `/` over the untouched initial input replaces it
         let mut mb = Minibuffer::new("Find file: ".into(), true, Some("/home/user/".into()));
         mb.insert_char('/');
-        assert_eq!(mb.input(), "/", "file-name-shadow replaces the default dir");
+        assert_eq!(mb.input, "/", "file-name-shadow replaces the default dir");
         // backspace/delete now have text to work on
         mb.delete_backward();
-        assert_eq!(mb.input(), "");
+        assert_eq!(mb.input, "");
+    }
+
+    #[test]
+    fn multibyte_editing() {
+        let mut mb = Minibuffer::new("".into(), false, None);
+        mb.insert_char('中');
+        mb.insert_char('文');
+        mb.insert_char('x');
+        assert_eq!(mb.input, "中文x");
+        // backspace removes the whole 'x', then whole chars
+        mb.delete_backward();
+        assert_eq!(mb.input, "中文");
+        mb.delete_backward();
+        assert_eq!(mb.input, "中");
+        mb.insert_char('y');
+        assert_eq!(mb.input, "中y");
+        // delete-forward at the start removes the whole first char
+        mb.to_start();
+        mb.delete_forward();
+        assert_eq!(mb.input, "y");
+    }
+
+    #[test]
+    fn multibyte_cursor_motion() {
+        let mut mb = Minibuffer::new("".into(), false, None);
+        mb.insert_char('中');
+        mb.insert_char('文');
+        mb.move_left();
+        mb.insert_char('x');
+        assert_eq!(mb.input, "中x文");
+        mb.move_right();
+        mb.move_right();
+        mb.insert_char('y');
+        assert_eq!(mb.input, "中x文y");
     }
 
     #[test]
@@ -277,19 +291,19 @@ mod tests {
         let mut mb = Minibuffer::new("M-x ".into(), true, None);
         mb.insert_char('d');
         mb.complete_with(vec!["delete-char".into(), "describe-key".into()], true);
-        assert_eq!(mb.input(), "d", "input untouched");
+        assert_eq!(mb.input, "d", "input untouched");
         assert_eq!(mb.preview, "e", "common prefix shown as preview");
         assert_eq!(mb.accepted(), "de");
         assert_eq!(mb.candidates.len(), 2);
         // TAB: fold the preview into the input
         mb.accept_preview();
-        assert_eq!(mb.input(), "de");
+        assert_eq!(mb.input, "de");
         assert!(mb.cycle());
-        assert_eq!(mb.input(), "delete-char");
+        assert_eq!(mb.input, "delete-char");
         assert!(mb.cycle());
-        assert_eq!(mb.input(), "describe-key");
+        assert_eq!(mb.input, "describe-key");
         assert!(mb.cycle());
-        assert_eq!(mb.input(), "delete-char", "wraps around");
+        assert_eq!(mb.input, "delete-char", "wraps around");
     }
 
     #[test]
@@ -298,7 +312,7 @@ mod tests {
         mb.insert_char('l');
         mb.insert_char('u');
         mb.complete_with(vec!["lua-mode".into()], true);
-        assert_eq!(mb.input(), "lu");
+        assert_eq!(mb.input, "lu");
         assert_eq!(mb.preview, "a-mode");
         assert_eq!(mb.accepted(), "lua-mode");
         assert!(!mb.cycle(), "single candidate does not cycle");
@@ -313,7 +327,7 @@ mod tests {
         for c in "xt-mode".chars() {
             mb.insert_char(c);
         }
-        assert_eq!(mb.input(), "txt-mode", "typing through the preview");
+        assert_eq!(mb.input, "txt-mode", "typing through the preview");
         assert_eq!(mb.preview, "");
         assert_eq!(mb.accepted(), "txt-mode");
     }
@@ -324,7 +338,7 @@ mod tests {
         mb.insert_char('t');
         mb.complete_with(vec!["txt-mode".into()], true);
         mb.insert_char('z');
-        assert_eq!(mb.input(), "tz");
+        assert_eq!(mb.input, "tz");
         assert_eq!(mb.preview, "");
     }
 
@@ -333,14 +347,14 @@ mod tests {
         let mut mb = Minibuffer::new("M-x ".into(), true, None);
         mb.complete_with(vec!["a-command".into(), "b-command".into()], true);
         assert!(mb.cycle());
-        assert_eq!(mb.input(), "a-command");
+        assert_eq!(mb.input, "a-command");
         // new input -> new candidate set -> cycle restarts
         mb.complete_with(
             vec!["a-command".into(), "b-command".into(), "c-command".into()],
             true,
         );
         assert!(mb.cycle());
-        assert_eq!(mb.input(), "a-command");
+        assert_eq!(mb.input, "a-command");
     }
 
     #[test]
@@ -361,7 +375,7 @@ mod tests {
             vec!["describe-bindings".into(), "describe-key".into()],
             false,
         );
-        assert_eq!(mb.input(), "describ", "deleted char stays deleted");
+        assert_eq!(mb.input, "describ", "deleted char stays deleted");
         assert_eq!(mb.preview, "", "no preview after deletion");
     }
 }

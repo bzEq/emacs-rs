@@ -15,7 +15,6 @@ emacs-lua = { path = "../lua" }
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true
-signal-hook = "0.4.4"
 
 [dev-dependencies]
 libc = "0.2"

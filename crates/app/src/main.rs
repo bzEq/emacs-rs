@@ -8,9 +8,6 @@
 use std::io::{self, Stdout};
 use std::panic;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyEventKind, KeyModifiers};
@@ -26,35 +23,6 @@ use emacs_lua::LuaHost;
 use emacs_ui::render;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-
-/// Restores the terminal when dropped, so every early-error path after
-/// entering raw mode (including `?` propagation out of `main`) leaves a
-/// usable terminal behind.
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-    }
-}
-
-/// Register signal handlers: SIGTERM/SIGHUP request a clean quit, SIGINT
-/// acts as `C-g` (abort the pending command or prefix). The flags are
-/// polled from the event loop so terminal cleanup always runs.
-fn register_signals() -> Result<(Arc<AtomicBool>, Arc<AtomicBool>)> {
-    use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
-    let quit = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::new(AtomicBool::new(false));
-    for (sig, flag) in [
-        (SIGTERM, quit.clone()),
-        (SIGHUP, quit.clone()),
-        (SIGINT, cancel.clone()),
-    ] {
-        signal_hook::flag::register(sig, flag)?;
-    }
-    Ok((quit, cancel))
-}
 
 /// Parsed command-line options.
 struct CliArgs {
@@ -121,7 +89,6 @@ fn main() -> Result<()> {
     }
 
     enable_raw_mode()?;
-    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -165,9 +132,7 @@ fn main() -> Result<()> {
         ed.error(e.to_string());
     }
 
-    let (quit_flag, cancel_flag) = register_signals()?;
-
-    let result = run(&mut ed, &mut terminal, &quit_flag, &cancel_flag);
+    let result = run(&mut ed, &mut terminal);
 
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
@@ -190,23 +155,16 @@ fn init_file() -> Option<PathBuf> {
     Some(dir.join("emacs-rs").join("init.lua"))
 }
 
-fn run(
-    ed: &mut Editor,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    quit: &AtomicBool,
-    cancel: &AtomicBool,
-) -> Result<()> {
+fn run(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     loop {
-        // SIGINT acts as C-g; SIGTERM/SIGHUP end the loop below
-        if cancel.swap(false, Ordering::Relaxed) {
-            signal_cancel(ed)?;
-        }
-        draw(ed, terminal)?;
-        if quit.load(Ordering::Relaxed) || ed.quit() {
+        ed.scroll_current_view();
+        terminal.draw(|f| {
+            if let Some((x, y)) = render(f, ed) {
+                f.set_cursor_position(ratatui::layout::Position::new(x, y));
+            }
+        })?;
+        if ed.quit() {
             return Ok(());
-        }
-        if !event::poll(Duration::from_millis(100))? {
-            continue;
         }
         match event::read()? {
             Event::Key(k) if k.kind == KeyEventKind::Press => {
@@ -221,36 +179,6 @@ fn run(
                 ed.set_window_size(h.saturating_sub(2) as usize, w as usize);
             }
             _ => {}
-        }
-    }
-}
-
-fn draw(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    ed.scroll_current_view();
-    terminal.draw(|f| {
-        if let Some((x, y)) = render(f, ed) {
-            f.set_cursor_position(ratatui::layout::Position::new(x, y));
-        }
-    })?;
-    Ok(())
-}
-
-/// Abort the pending read (or clear the pending prefix) exactly like C-g.
-fn signal_cancel(ed: &mut Editor) -> Result<()> {
-    match ed.pending() {
-        Some(PendingRequest::ReadString { .. }) => {
-            ed.clear_pending_keys();
-            ed.message("Quit");
-            resume(ed, ResumeValue::String(None))
-        }
-        Some(PendingRequest::ReadYesNo { .. }) => {
-            ed.message("Quit");
-            resume(ed, ResumeValue::Bool(None))
-        }
-        Some(PendingRequest::ReadKey) => Ok(()),
-        None => {
-            ed.clear_pending_keys();
-            Ok(())
         }
     }
 }
@@ -408,26 +336,18 @@ fn run_command(ed: &mut Editor, name: &str, extra: Option<char>) {
     }
 }
 
-/// Resume a suspended command coroutine with a value. If the resumed
-/// command interrupted an outer read (recursive minibuffer), that read is
-/// restored after the outcome is applied.
+/// Resume a suspended command coroutine with a value.
 fn resume(ed: &mut Editor, value: ResumeValue) -> Result<()> {
     match ed.resume_pending(value) {
-        Ok(res) => {
-            if let Some(key) = ed.finish_command(res.outcome) {
+        Ok(outcome) => {
+            if let Some(key) = ed.finish_command(outcome) {
                 return dispatch(ed, key);
-            }
-            if let Some(restore) = res.restore {
-                ed.restore_pending_read(restore.request, restore.minibuffer);
             }
             Ok(())
         }
         Err(e) => {
             ed.finish_command(CommandOutcome::Done);
-            if let Some(restore) = e.restore {
-                ed.restore_pending_read(restore.request, restore.minibuffer);
-            }
-            ed.error(e.error.to_string());
+            ed.error(e.to_string());
             Ok(())
         }
     }
@@ -445,28 +365,19 @@ fn update_completion(ed: &mut Editor, fill: bool) {
         .minibuffer()
         .map(|mb| mb.input.clone())
         .unwrap_or_default();
-    let candidates = match ed.update_completion(&input) {
-        Ok(c) => c,
-        Err(e) => {
-            ed.error(e.to_string());
-            return;
-        }
-    };
+    let candidates = ed.update_completion(&input).unwrap_or_default();
     if let Some(mb) = ed.minibuffer_mut() {
         mb.complete_with(candidates, fill);
     }
-    // only when the auto-fill extended the input do we recompute, so the
-    // displayed candidates match what is in the minibuffer
-    let new_input = ed
+    // recompute against the (possibly extended) input so the displayed
+    // candidates always match what is in the minibuffer
+    let input = ed
         .minibuffer()
         .map(|mb| mb.input.clone())
         .unwrap_or_default();
-    if new_input != input {
-        if let Ok(candidates) = ed.update_completion(&new_input) {
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.candidates = candidates;
-            }
-        }
+    let candidates = ed.update_completion(&input).unwrap_or_default();
+    if let Some(mb) = ed.minibuffer_mut() {
+        mb.candidates = candidates;
     }
 }
 
@@ -558,7 +469,6 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             // The command runs against the live minibuffer input state;
             // capture it afterwards (finish_command clears it) so the
             // read continues with the edits applied.
-            let before = ed.pending().cloned();
             let outcome = match ed.call_command(&name, None) {
                 Ok(o) => o,
                 Err(e) => {
@@ -571,10 +481,8 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
                 let _ = key; // commands run from the minibuffer don't replay
             }
             if ed.pending().is_none() {
-                // the command finished without yielding: restore the outer
-                // read it interrupted (recursive minibuffer)
-                if let (Some(request), Some(mb)) = (before, after) {
-                    ed.restore_pending_read(request, Some(mb));
+                if let Some(mb) = after {
+                    ed.restore_minibuffer(mb);
                 }
             }
             update_completion(ed, false);

@@ -121,7 +121,7 @@ M.define("dired", function()
   local default = M.default_directory()
   local input = emacs.read_string("Dired (directory): ", M.complete_file_names, default)
   local dir
-  if not input or input:match("^%s*$") then
+  if not input or input:match("^%s*$") == "" then
     dir = default
   else
     local expanded = raw.expand_tilde(input:match("^%s*(.-)%s*$"))
@@ -170,9 +170,7 @@ M.define("dired-refresh", function()
 end, "Re-read the directory listing.")
 
 M.define("dired-quit", function()
-  local id = raw.id()
-  M.cleanup_buffer(id)
-  raw.kill_buffer(id)
+  raw.kill_buffer(raw.id())
 end, "Kill the dired buffer.")
 
 local function set_mark(marked)
@@ -225,17 +223,9 @@ M.define("dired-delete", function()
   if yes == nil then return end
   if yes then
     for _, t in ipairs(targets) do
-      local proceed = true
-      if t.dir then
-        -- recursive deletes are destructive: confirm per directory
-        proceed = emacs.read_yes_no(
-          "Delete directory " .. t.path .. " and all its contents? (y/n)") == true
-      end
-      if proceed then
-        local ok, err = pcall(raw.delete_file, t.path, t.dir)
-        if not ok then
-          emacs.error("cannot delete " .. t.path .. ": " .. tostring(err))
-        end
+      local ok, err = pcall(raw.delete_file, t.path, t.dir)
+      if not ok then
+        emacs.error("cannot delete " .. t.path .. ": " .. tostring(err))
       end
     end
   end
@@ -250,7 +240,7 @@ M.define("dired-rename", function()
   local base = src:match("([^/]+)$") or ""
   if is_dot(base) then return end
   local input = emacs.read_string("Rename " .. base .. " to: ", nil)
-  if not input or input:match("^%s*$") then return end
+  if not input or input:match("^%s*$") == "" then return end
   local parent = src:match("^(.*)/") or "/"
   local dest = parent .. "/" .. input:match("^%s*(.-)%s*$")
   local ok, err = pcall(raw.rename_file, src, dest)
@@ -275,7 +265,7 @@ M.define("dired-copy", function()
     return
   end
   local input = emacs.read_string("Copy to: ", nil)
-  if not input or input:match("^%s*$") then return end
+  if not input or input:match("^%s*$") == "" then return end
   local dest_dir = input:match("^%s*(.-)%s*$")
   if not raw.is_dir(dest_dir) then
     emacs.error(dest_dir .. " is not a directory")
@@ -294,7 +284,7 @@ end, "Copy marked (or current) files.")
 M.define("dired-create-directory", function()
   local d = M.dired[raw.id()]
   local input = emacs.read_string("Create directory: ", nil)
-  if not input or input:match("^%s*$") then return end
+  if not input or input:match("^%s*$") == "" then return end
   local name = input:match("^%s*(.-)%s*$")
   local ok, err = pcall(raw.mkdir, d.dir .. "/" .. name)
   if not ok then

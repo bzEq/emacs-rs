@@ -132,38 +132,23 @@ M.define("indent-for-tab-command", function()
 end, "Indent the current line, or insert a tab.")
 
 M.define("delete-char", function(prefix)
-  local n = prefix or 1
-  if n < 0 then
-    for _ = 1, -n do emacs.delete_backward() end
-  else
-    for _ = 1, math.max(n, 1) do emacs.delete_forward() end
+  for _ = 1, math.max(prefix, 1) do
+    emacs.delete_forward()
   end
 end, "Delete the character at point.")
 
 M.define("backward-delete-char", function(prefix)
-  local n = prefix or 1
-  if n < 0 then
-    for _ = 1, -n do emacs.delete_forward() end
-  else
-    for _ = 1, math.max(n, 1) do
-      if not backward_delete_indent() then
-        emacs.delete_backward()
-      end
+  for _ = 1, math.max(prefix, 1) do
+    if not backward_delete_indent() then
+      emacs.delete_backward()
     end
   end
 end, "Delete the character before point.")
 
 M.define("kill-line", function(prefix)
-  local n = prefix or 1
-  if n < 0 then
-    -- kill the -n lines before point (Emacs semantics)
-    local start_line = math.max(raw.line_of_point() + n, 0)
-    local start = raw.line_start(start_line)
-    M.kill(emacs.delete_range(start, raw.point()))
-    return
-  end
+  local n = math.max(prefix, 1)
   local killed = ""
-  for _ = 1, math.max(n, 1) do
+  for _ = 1, n do
     local line = raw.line_of_point()
     local line_start = raw.line_start(line)
     local eol = line_start + raw.line_len(line)
@@ -177,19 +162,9 @@ M.define("kill-line", function(prefix)
 end, "Kill the rest of the current line.")
 
 M.define("kill-word", function(prefix)
-  local n = prefix or 1
-  if n < 0 then
-    local killed = ""
-    for _ = 1, -n do
-      local e = raw.point()
-      raw.move_word("backward")
-      killed = emacs.delete_range(raw.point(), e) .. killed
-    end
-    M.kill(killed)
-    return
-  end
+  local n = math.max(prefix, 1)
   local killed = ""
-  for _ = 1, math.max(n, 1) do
+  for _ = 1, n do
     local start = raw.point()
     raw.move_word("forward")
     killed = killed .. emacs.delete_range(start, raw.point())
@@ -198,19 +173,9 @@ M.define("kill-word", function(prefix)
 end, "Kill the word after point.")
 
 M.define("backward-kill-word", function(prefix)
-  local n = prefix or 1
-  if n < 0 then
-    local killed = ""
-    for _ = 1, -n do
-      local start = raw.point()
-      raw.move_word("forward")
-      killed = killed .. emacs.delete_range(start, raw.point())
-    end
-    M.kill(killed)
-    return
-  end
+  local n = math.max(prefix, 1)
   local killed = ""
-  for _ = 1, math.max(n, 1) do
+  for _ = 1, n do
     local e = raw.point()
     raw.move_word("backward")
     killed = killed .. emacs.delete_range(raw.point(), e)
@@ -235,9 +200,15 @@ M.define("kill-ring-save", function()
 end, "Copy the region to the kill ring.")
 
 M.define("yank", function(prefix)
-  if not M.yank_current(prefix) then
+  local t = M.current_kill()
+  if not t then
     error("Kill ring is empty")
   end
+  local pos = raw.point()
+  for _ = 1, math.max(prefix, 1) do
+    emacs.insert(t)
+  end
+  M.last_yank = { pos = pos, len = raw.point() - pos }
 end, "Insert the most recent kill.")
 
 M.define("yank-pop", function()
@@ -250,11 +221,6 @@ M.define("yank-pop", function()
   if not M.last_yank then
     error("Previous command was not a yank")
   end
-  -- the buffer must still contain exactly the yanked text
-  local cur = raw.get_text(M.last_yank.pos, M.last_yank.pos + M.last_yank.len)
-  if cur ~= M.last_yank.text then
-    error("The yanked text has changed; yank-pop is not possible")
-  end
   local t = M.kill_ring_pop()
   if not t then
     error("Kill ring is empty")
@@ -262,12 +228,7 @@ M.define("yank-pop", function()
   emacs.delete_range(M.last_yank.pos, M.last_yank.pos + M.last_yank.len)
   raw.set_point(M.last_yank.pos)
   emacs.insert(t)
-  M.last_yank = {
-    id = M.last_yank.id,
-    pos = M.last_yank.pos,
-    len = raw.point() - M.last_yank.pos,
-    text = raw.get_text(M.last_yank.pos, raw.point()),
-  }
+  M.last_yank = { pos = M.last_yank.pos, len = raw.point() - M.last_yank.pos }
 end, "Replace yanked text with a previous kill.")
 
 M.define("undo", function()
@@ -280,11 +241,6 @@ M.define("set-mark-command", function()
 end, "Set the mark where point is.")
 
 local function goto_line_number(n)
-  n = math.floor(n)
-  if n < 1 or n ~= n then
-    emacs.error("Goto line requires a positive line number")
-    return
-  end
   local last = raw.len_lines() - 1
   local line = math.min(n - 1, last)
   local old = raw.point()
@@ -295,12 +251,12 @@ end
 
 M.define("goto-line", function(prefix)
   if M.prefix_active() then
-    goto_line_number(prefix)
+    goto_line_number(math.max(prefix, 1))
     return
   end
   local max = raw.len_lines()
   local input = emacs.read_string("Goto line (1-" .. max .. "): ", nil)
-  if not input or input:match("^%s*$") then return end
+  if not input or input:match("^%s*$") == "" then return end
   local n = tonumber(input:match("^%s*(.-)%s*$"))
   if not n then
     emacs.error("not a number")

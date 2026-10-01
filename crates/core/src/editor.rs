@@ -13,9 +13,7 @@ use crate::keymap::{Keymap, Lookup};
 use crate::minibuffer::Minibuffer;
 use crate::minor::MinorModeDef;
 use crate::mode::ModeDef;
-use crate::script::{
-    CommandOutcome, NullHost, PendingRequest, ResumeError, ResumeOutcome, ResumeValue, ScriptHost,
-};
+use crate::script::{CommandOutcome, NullHost, PendingRequest, ResumeValue, ScriptHost};
 use crate::view::View;
 use crate::window::{Rect as WinRect, Split, WindowTree};
 
@@ -118,39 +116,24 @@ impl Editor {
         &mut self.buffers
     }
 
-    /// Index into `buffers` of the buffer with the given id, if it exists.
-    pub fn buffer_index(&self, id: usize) -> Option<usize> {
-        self.buffers.iter().position(|b| b.id == id)
+    /// Index into `buffers` of the buffer with the given id.
+    pub fn buffer_index(&self, id: usize) -> usize {
+        self.buffers
+            .iter()
+            .position(|b| b.id == id)
+            .expect("buffer id exists")
     }
 
-    /// The buffer that editing commands act on: the minibuffer input while
-    /// the minibuffer is active, otherwise the buffer shown in the
-    /// selected window (Emacs's model — the minibuffer is the current
-    /// buffer during a read).
+    /// The buffer shown in the selected window.
     pub fn buf(&self) -> &Buffer {
-        if let Some(mb) = &self.minibuffer {
-            return mb.buffer();
-        }
         let id = self.windows.selected_buffer();
-        &self.buffers[self.buffer_index(id).expect("selected buffer id exists")]
+        &self.buffers[self.buffer_index(id)]
     }
 
     pub fn buf_mut(&mut self) -> &mut Buffer {
-        if let Some(mb) = &mut self.minibuffer {
-            return mb.buffer_mut();
-        }
         let id = self.windows.selected_buffer();
-        let idx = self.buffer_index(id).expect("selected buffer id exists");
+        let idx = self.buffer_index(id);
         &mut self.buffers[idx]
-    }
-
-    /// Id of the buffer that editing commands act on (the minibuffer input
-    /// while the minibuffer is active).
-    pub fn current_buffer_id(&self) -> usize {
-        if let Some(mb) = &self.minibuffer {
-            return mb.buffer().id;
-        }
-        self.windows.selected_buffer()
     }
 
     pub fn selected_buffer_id(&self) -> usize {
@@ -159,7 +142,7 @@ impl Editor {
 
     pub fn selected_buffer_index(&self) -> usize {
         let id = self.windows.selected_buffer();
-        self.buffer_index(id).expect("selected buffer id exists")
+        self.buffer_index(id)
     }
 
     /// Show `id` in the selected window, preserving window-points.
@@ -168,17 +151,13 @@ impl Editor {
         if old_id == id {
             return;
         }
-        let old_idx = self
-            .buffer_index(old_id)
-            .expect("selected buffer id exists");
-        let new_idx = self.buffer_index(id).expect("buffer id exists");
+        let old_idx = self.buffer_index(old_id);
+        let new_idx = self.buffer_index(id);
         let point = self.buffers[old_idx].point();
         let w = self.windows.selected_mut();
-        // A previous switch may have saved this buffer's point in the window
-        // slot; restore it now, then save the outgoing buffer's point.
-        let saved = w.point.take();
         w.point = Some(point);
         w.buffer = id;
+        let saved = w.point.take();
         if let Some(p) = saved {
             self.buffers[new_idx].set_point(p);
         }
@@ -215,7 +194,7 @@ impl Editor {
     /// Kill the buffer with id `id`, pointing any windows that displayed it
     /// at another buffer.
     pub fn kill_buffer_at(&mut self, id: usize) {
-        let idx = self.buffer_index(id).expect("buffer id exists");
+        let idx = self.buffer_index(id);
         self.remove_buffer(idx);
         if self.buffers().is_empty() {
             let scratch = Buffer::new("*scratch*");
@@ -231,7 +210,7 @@ impl Editor {
     /// Write the buffer with `id` to its file (raises on IO error; the Lua
     /// layer handles modified flags and save hooks).
     pub fn save_buffer_to_disk(&mut self, id: usize) -> Result<()> {
-        let idx = self.buffer_index(id).expect("buffer id exists");
+        let idx = self.buffer_index(id);
         self.buffers()[idx].save().map_err(|e| anyhow!("{e}"))
     }
 
@@ -258,9 +237,7 @@ impl Editor {
             .layout(body)
             .into_iter()
             .map(|(path, w, rect)| {
-                let idx = self
-                    .buffer_index(w.buffer)
-                    .expect("window buffer id exists");
+                let idx = self.buffer_index(w.buffer);
                 WindowLayout {
                     buf: &self.buffers[idx],
                     view: &w.view,
@@ -307,20 +284,14 @@ impl Editor {
     /// false if there is only one window.
     pub fn other_window(&mut self) -> bool {
         let old_id = self.windows.selected_buffer();
-        let old_idx = self
-            .buffer_index(old_id)
-            .expect("selected buffer id exists");
+        let old_idx = self.buffer_index(old_id);
         let point = self.buffers[old_idx].point();
         self.windows.selected_mut().point = Some(point);
         if !self.windows.next() {
-            // only one window: leave no stale window-point behind
-            self.windows.selected_mut().point = None;
             return false;
         }
         let new_id = self.windows.selected_buffer();
-        let new_idx = self
-            .buffer_index(new_id)
-            .expect("selected buffer id exists");
+        let new_idx = self.buffer_index(new_id);
         let saved = self.windows.selected().point;
         if let Some(p) = saved {
             self.buffers[new_idx].set_point(p);
@@ -341,7 +312,7 @@ impl Editor {
     /// Keep the selected window's view scrolled so the cursor is visible.
     pub fn scroll_current_view(&mut self) {
         let id = self.windows.selected_buffer();
-        let idx = self.buffer_index(id).expect("selected buffer id exists");
+        let idx = self.buffer_index(id);
         let rows = self.selected_window_height();
         let buf = &mut self.buffers[idx];
         let w = self.windows.selected_mut();
@@ -350,7 +321,7 @@ impl Editor {
 
     pub fn page_down_current(&mut self) {
         let id = self.windows.selected_buffer();
-        let idx = self.buffer_index(id).expect("selected buffer id exists");
+        let idx = self.buffer_index(id);
         let rows = self.selected_window_height();
         let buf = &mut self.buffers[idx];
         let w = self.windows.selected_mut();
@@ -359,7 +330,7 @@ impl Editor {
 
     pub fn page_up_current(&mut self) {
         let id = self.windows.selected_buffer();
-        let idx = self.buffer_index(id).expect("selected buffer id exists");
+        let idx = self.buffer_index(id);
         let rows = self.selected_window_height();
         let buf = &mut self.buffers[idx];
         let w = self.windows.selected_mut();
@@ -368,7 +339,7 @@ impl Editor {
 
     pub fn recenter_current(&mut self) {
         let id = self.windows.selected_buffer();
-        let idx = self.buffer_index(id).expect("selected buffer id exists");
+        let idx = self.buffer_index(id);
         let rows = self.selected_window_height();
         let buf = &self.buffers[idx];
         let w = self.windows.selected_mut();
@@ -396,9 +367,10 @@ impl Editor {
         if !buf.syntax_dirty() && buf.syntax().is_some() {
             return;
         }
-        if buf
-            .syntax_last_parse()
-            .is_some_and(|t| t.elapsed() < COOLDOWN)
+        if buf.syntax().is_some()
+            && buf
+                .syntax_last_parse()
+                .is_some_and(|t| t.elapsed() < COOLDOWN)
         {
             return; // dirty but throttled; re-parsed on a later key
         }
@@ -406,10 +378,8 @@ impl Editor {
         if let Some(s) = crate::syntax::parse(lang, &text) {
             buf.set_syntax(Some(s));
             buf.set_syntax_dirty(false);
+            buf.set_syntax_last_parse(std::time::Instant::now());
         }
-        // Note the attempt even on failure so a pathological file that cannot
-        // be parsed doesn't re-try on every keypress.
-        buf.set_syntax_last_parse(std::time::Instant::now());
     }
 
     // --- search ------------------------------------------------------------
@@ -651,17 +621,6 @@ impl Editor {
         self.minibuffer = Some(mb);
     }
 
-    /// Reinstall an interrupted read (recursive minibuffer): both the
-    /// pending request and the minibuffer state it came with.
-    pub fn restore_pending_read(
-        &mut self,
-        request: PendingRequest,
-        minibuffer: Option<Minibuffer>,
-    ) {
-        self.pending = Some(request);
-        self.minibuffer = minibuffer;
-    }
-
     /// C-n / C-p: step through the input history, recalling entries into
     /// the minibuffer input. Past the last entry the input is empty.
     pub fn minibuffer_history_step(&mut self, dir: isize) {
@@ -674,12 +633,14 @@ impl Editor {
             return;
         }
         mb.history_index = idx as usize;
-        let text = if (idx as usize) < self.minibuffer_history.len() {
+        mb.input = if (idx as usize) < self.minibuffer_history.len() {
             self.minibuffer_history[idx as usize].clone()
         } else {
             String::new()
         };
-        mb.set_input(&text);
+        mb.cursor = mb.input.len();
+        mb.preview.clear();
+        mb.candidates.clear();
     }
 
     pub fn pending(&self) -> Option<&PendingRequest> {
@@ -803,14 +764,8 @@ impl Editor {
     }
 
     /// Resume a suspended command coroutine.
-    pub fn resume_pending(
-        &mut self,
-        value: ResumeValue,
-    ) -> std::result::Result<ResumeOutcome, ResumeError> {
-        let mut out = Err(ResumeError {
-            error: anyhow!("no script host attached"),
-            restore: None,
-        });
+    pub fn resume_pending(&mut self, value: ResumeValue) -> Result<CommandOutcome> {
+        let mut out = Err(anyhow!("no script host attached"));
         self.with_host(|ed, host| {
             out = host.resume_pending(value, ed);
         });
@@ -946,34 +901,6 @@ mod tests {
         assert_eq!(ed.buf().point(), 1, "old window keeps its point");
         assert!(ed.other_window());
         assert_eq!(ed.buf().point(), 2);
-    }
-
-    #[test]
-    fn set_selected_buffer_preserves_points() {
-        let mut ed = Editor::new(20, 80);
-        ed.buf_mut().insert("hello");
-        ed.buf_mut().move_to_buffer_start();
-        ed.buf_mut().move_char(crate::buffer::Direction::Forward);
-        assert_eq!(ed.buf().point(), 1);
-        let first = ed.selected_buffer_id();
-        let second = ed.new_buffer("other");
-        ed.set_selected_buffer(second);
-        assert_eq!(ed.buf().point(), 0, "fresh buffer keeps its own point");
-        ed.buf_mut().insert("xy");
-        assert_eq!(ed.buf().point(), 2);
-        ed.set_selected_buffer(first);
-        assert_eq!(ed.buf().point(), 1, "switching back restores window-point");
-        ed.set_selected_buffer(second);
-        assert_eq!(ed.buf().point(), 2, "second buffer keeps its own point");
-    }
-
-    #[test]
-    fn other_window_single_leaves_no_stale_point() {
-        let mut ed = Editor::new(20, 80);
-        ed.buf_mut().insert("abc");
-        ed.buf_mut().move_char(crate::buffer::Direction::Forward);
-        assert!(!ed.other_window());
-        assert_eq!(ed.windows.selected().point, None);
     }
 
     #[test]

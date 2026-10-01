@@ -17,16 +17,10 @@
 //! app-data for the duration of the call and removes it afterwards, so the
 //! `raw.*` API can reach the editor from Lua callbacks. During Lua
 //! execution the surrounding `&mut Editor` is not accessed, so no aliasing
-//! occurs. `with_editor` refuses nested host calls (a host entry made from
-//! Lua while another is on the stack), which is what would otherwise
-//! alias the surrounding `&mut Editor`; `emacs.execute` runs commands in
-//! the *current* coroutine in pure Lua, so it never nests host calls. The
-//! editor must not move while a call is in flight (it is owned by the
-//! app's main function, so this holds).
+//! occurs. The editor must not move while a call is in flight (it is owned
+//! by the app's main function, so this holds).
 
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
 use mlua::thread::ThreadStatus;
@@ -36,10 +30,7 @@ use emacs_core::editor::Editor;
 use emacs_core::key::Key;
 use emacs_core::keymap::{Keymap, Lookup};
 use emacs_core::mode::Lang;
-use emacs_core::script::{
-    CommandOutcome, PendingRequest, RestoreInfo, ResumeError, ResumeOutcome, ResumeValue,
-    ScriptHost,
-};
+use emacs_core::script::{CommandOutcome, PendingRequest, ResumeValue, ScriptHost};
 
 /// The Lua runtime modules, loaded in this exact order. Every module is
 /// required: a missing or broken one is a fatal error, reported by the
@@ -98,44 +89,16 @@ fn anyhow_err(e: mlua::Error) -> anyhow::Error {
     anyhow!("{e}")
 }
 
-/// Run `f` with the editor reachable from Lua callbacks. Nested host
-/// execution (a host call made from Lua while another host call is on the
-/// stack) is refused: it would alias the surrounding `&mut Editor` and
-/// corrupt the pending-command stack. Both the app-data slot and the
-/// nesting flag are cleaned up on every exit path, including panics.
+/// Run `f` with the editor reachable from Lua callbacks.
 fn with_editor<T>(
-    host_call: &Cell<bool>,
     lua: &Lua,
     editor: &mut Editor,
     f: impl FnOnce(&Lua) -> mlua::Result<T>,
 ) -> Result<T> {
-    if host_call.get() {
-        return Err(anyhow!("nested host execution is not allowed"));
-    }
-    struct Reset<'a>(&'a Cell<bool>);
-    impl Drop for Reset<'_> {
-        fn drop(&mut self) {
-            self.0.set(false);
-        }
-    }
-    host_call.set(true);
-    let _reset = Reset(host_call);
     lua.set_app_data::<Option<EditorRef>>(Some(EditorRef(editor)));
-    struct ClearAppData<'a>(&'a Lua);
-    impl Drop for ClearAppData<'_> {
-        fn drop(&mut self) {
-            let _ = self.0.set_app_data::<Option<EditorRef>>(None);
-        }
-    }
-    let _clear = ClearAppData(lua);
-    f(lua).map_err(anyhow_err)
-}
-
-/// Any buffer id coming from Lua is validated here, so a stale id (e.g. a
-/// killed buffer) is a graceful Lua error instead of a panic in the core.
-fn buffer_idx(ed: &Editor, id: usize) -> mlua::Result<usize> {
-    ed.buffer_index(id)
-        .ok_or_else(|| mlua::Error::RuntimeError(format!("no buffer with id {id}")))
+    let r = f(lua).map_err(anyhow_err);
+    lua.set_app_data::<Option<EditorRef>>(None);
+    r
 }
 
 /// Build a keymap from a Lua table of `{ ["key seq"] = "command", ... }`.
@@ -229,35 +192,22 @@ fn interpret(thread: Thread, v: Value) -> mlua::Result<(CommandOutcome, Option<F
     }
 }
 
-/// A suspended command coroutine, the completion callback of its current
-/// minibuffer read (if any), and the outer read it interrupted (if any).
+/// A suspended command coroutine and the completion callback of its current
+/// minibuffer read, if any.
 struct PendingThread {
     thread: Thread,
     completion: Option<Function>,
-    /// The read state this command replaced when it was started while
-    /// another read was pending; restored when this command's read
-    /// finishes (or errors), so the outer command can resume.
-    restore: Option<RestoreInfo>,
 }
 
 pub struct LuaHost {
     lua: Lua,
-    /// Stack of suspended command coroutines: a command started from the
-    /// minibuffer while another command awaits input suspends on top of
-    /// the previous one (recursive minibuffer).
-    pending: Vec<PendingThread>,
-    /// True while a host call executes Lua on the stack (see `with_editor`).
-    host_call: Rc<Cell<bool>>,
+    pending: Option<PendingThread>,
 }
 
 impl LuaHost {
     pub fn new() -> Result<Self> {
         let lua = Lua::new();
-        let mut host = LuaHost {
-            lua,
-            pending: Vec::new(),
-            host_call: Rc::new(Cell::new(false)),
-        };
+        let mut host = LuaHost { lua, pending: None };
         host.install_api().map_err(anyhow_err)?;
         Ok(host)
     }
@@ -270,51 +220,33 @@ impl LuaHost {
         extra: Option<char>,
         editor: &mut Editor,
     ) -> Result<CommandOutcome> {
-        // If a read is already pending, remember its state so the host can
-        // restore it when this command's own read completes.
-        let restore = match (self.pending.is_empty(), editor.pending()) {
-            (false, Some(request)) => Some(RestoreInfo {
-                request: request.clone(),
-                minibuffer: editor.minibuffer().cloned(),
-            }),
-            _ => None,
-        };
-        let (outcome, completion, thread) =
-            with_editor(&self.host_call, &self.lua, editor, |lua| {
-                let run = run_command_fn(lua)?;
-                let thread = lua.create_thread(run)?;
-                let v: Value = match extra {
-                    Some(c) => thread.resume((name, c.to_string()))?,
-                    None => thread.resume(name)?,
-                };
-                let (outcome, completion) = interpret(thread.clone(), v)?;
-                Ok((outcome, completion, thread))
-            })?;
+        let (outcome, completion, thread) = with_editor(&self.lua, editor, |lua| {
+            let run = run_command_fn(lua)?;
+            let thread = lua.create_thread(run)?;
+            let v: Value = match extra {
+                Some(c) => thread.resume((name, c.to_string()))?,
+                None => thread.resume(name)?,
+            };
+            let (outcome, completion) = interpret(thread.clone(), v)?;
+            Ok((outcome, completion, thread))
+        })?;
         if matches!(outcome, CommandOutcome::Pending(_)) {
-            self.pending.push(PendingThread {
-                thread,
-                completion,
-                restore,
-            });
+            self.pending = Some(PendingThread { thread, completion });
         }
         Ok(outcome)
     }
 
-    /// Resume the topmost suspended coroutine with the requested input.
+    /// Resume the suspended coroutine with the requested input.
     fn resume_coroutine(
         &mut self,
         value: ResumeValue,
         editor: &mut Editor,
-    ) -> std::result::Result<ResumeOutcome, ResumeError> {
+    ) -> Result<CommandOutcome> {
         let pt = self
             .pending
-            .pop()
-            .ok_or_else(|| anyhow!("no pending command to resume"))
-            .map_err(|e| ResumeError {
-                error: e,
-                restore: None,
-            })?;
-        let resume = with_editor(&self.host_call, &self.lua, editor, |_lua| {
+            .take()
+            .ok_or_else(|| anyhow!("no pending command to resume"))?;
+        let (outcome, completion) = with_editor(&self.lua, editor, |_lua| {
             let v: Value = match value {
                 ResumeValue::String(Some(s)) => pt.thread.resume(s)?,
                 ResumeValue::String(None) => pt.thread.resume(())?,
@@ -322,31 +254,14 @@ impl LuaHost {
                 ResumeValue::Key(k) => pt.thread.resume(k.to_string())?,
             };
             interpret(pt.thread.clone(), v)
-        });
-        match resume {
-            Ok((outcome, completion)) => {
-                if matches!(outcome, CommandOutcome::Pending(_)) {
-                    self.pending.push(PendingThread {
-                        thread: pt.thread,
-                        completion,
-                        restore: pt.restore,
-                    });
-                    Ok(ResumeOutcome {
-                        outcome,
-                        restore: None,
-                    })
-                } else {
-                    Ok(ResumeOutcome {
-                        outcome,
-                        restore: pt.restore,
-                    })
-                }
-            }
-            Err(error) => Err(ResumeError {
-                error,
-                restore: pt.restore.map(Box::new),
-            }),
+        })?;
+        if matches!(outcome, CommandOutcome::Pending(_)) {
+            self.pending = Some(PendingThread {
+                thread: pt.thread,
+                completion,
+            });
         }
+        Ok(outcome)
     }
 
     // --- primitive API -----------------------------------------------------
@@ -617,7 +532,7 @@ impl LuaHost {
             "buffer_info",
             lua.create_function(|lua, id: usize| {
                 let ed = editor_ref(lua)?;
-                let idx = buffer_idx(ed, id)?;
+                let idx = ed.buffer_index(id);
                 let b = &ed.buffers()[idx];
                 let t = lua.create_table()?;
                 t.set("id", id)?;
@@ -631,9 +546,7 @@ impl LuaHost {
         raw.set(
             "select_buffer",
             lua.create_function(|lua, id: usize| {
-                let ed = editor_ref(lua)?;
-                buffer_idx(ed, id)?;
-                ed.set_selected_buffer(id);
+                editor_ref(lua)?.set_selected_buffer(id);
                 Ok(())
             })?,
         )?;
@@ -644,9 +557,7 @@ impl LuaHost {
         raw.set(
             "kill_buffer",
             lua.create_function(|lua, id: usize| {
-                let ed = editor_ref(lua)?;
-                buffer_idx(ed, id)?;
-                ed.kill_buffer_at(id);
+                editor_ref(lua)?.kill_buffer_at(id);
                 Ok(())
             })?,
         )?;
@@ -675,7 +586,7 @@ impl LuaHost {
             "set_buffer_name",
             lua.create_function(|lua, (id, name): (usize, String)| {
                 let ed = editor_ref(lua)?;
-                let idx = buffer_idx(ed, id)?;
+                let idx = ed.buffer_index(id);
                 ed.buffers_mut()[idx].set_name(name);
                 Ok(())
             })?,
@@ -684,7 +595,7 @@ impl LuaHost {
             "set_buffer_path",
             lua.create_function(|lua, (id, path): (usize, String)| {
                 let ed = editor_ref(lua)?;
-                let idx = buffer_idx(ed, id)?;
+                let idx = ed.buffer_index(id);
                 ed.buffers_mut()[idx].set_path(Some(PathBuf::from(path)));
                 Ok(())
             })?,
@@ -693,7 +604,7 @@ impl LuaHost {
             "set_buffer_modified",
             lua.create_function(|lua, (id, m): (usize, bool)| {
                 let ed = editor_ref(lua)?;
-                let idx = buffer_idx(ed, id)?;
+                let idx = ed.buffer_index(id);
                 ed.buffers_mut()[idx].set_modified(m);
                 Ok(())
             })?,
@@ -702,7 +613,7 @@ impl LuaHost {
             "set_buffer_read_only",
             lua.create_function(|lua, (id, ro): (usize, bool)| {
                 let ed = editor_ref(lua)?;
-                let idx = buffer_idx(ed, id)?;
+                let idx = ed.buffer_index(id);
                 ed.buffers_mut()[idx].set_read_only(ro);
                 Ok(())
             })?,
@@ -710,9 +621,8 @@ impl LuaHost {
         raw.set(
             "save_buffer_to_disk",
             lua.create_function(|lua, id: usize| {
-                let ed = editor_ref(lua)?;
-                buffer_idx(ed, id)?;
-                ed.save_buffer_to_disk(id)
+                editor_ref(lua)?
+                    .save_buffer_to_disk(id)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
         )?;
@@ -1058,6 +968,13 @@ impl LuaHost {
             })?,
         )?;
         raw.set(
+            "execute",
+            lua.create_function(|lua, name: String| {
+                run_command_fn(lua)?.call::<()>(name)?;
+                Ok(())
+            })?,
+        )?;
+        raw.set(
             "cwd",
             lua.create_function(|_lua, ()| {
                 Ok(std::env::current_dir()
@@ -1160,16 +1077,7 @@ fn key_seq_str(seq: &[Key]) -> String {
 }
 
 fn copy_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
-    let md = std::fs::symlink_metadata(src)?;
-    if md.file_type().is_symlink() {
-        // recreate the link instead of following it, so symlink loops can't
-        // recurse forever
-        let target = std::fs::read_link(src)?;
-        #[cfg(unix)]
-        return std::os::unix::fs::symlink(target, dest);
-        #[cfg(not(unix))]
-        return std::fs::copy(src, dest).map(|_| ());
-    }
+    let md = std::fs::metadata(src)?;
     if md.is_dir() {
         std::fs::create_dir_all(dest)?;
         for entry in std::fs::read_dir(src)? {
@@ -1186,7 +1094,7 @@ impl ScriptHost for LuaHost {
     fn load_file(&mut self, path: &Path, editor: &mut Editor) -> Result<()> {
         let code = std::fs::read_to_string(path)?;
         let name = path.display().to_string();
-        with_editor(&self.host_call, &self.lua, editor, |lua| {
+        with_editor(&self.lua, editor, |lua| {
             lua.load(&code).set_name(&name).exec()?;
             Ok(())
         })
@@ -1195,12 +1103,12 @@ impl ScriptHost for LuaHost {
     fn load_runtime(&mut self, editor: &mut Editor) -> Result<()> {
         for (name, code) in RUNTIME_SOURCES {
             let chunk = format!("lua/{name}");
-            with_editor(&self.host_call, &self.lua, editor, |lua| {
+            with_editor(&self.lua, editor, |lua| {
                 lua.load(*code).set_name(&chunk).exec()?;
                 Ok(())
             })?;
         }
-        with_editor(&self.host_call, &self.lua, editor, |lua| {
+        with_editor(&self.lua, editor, |lua| {
             internals_table(lua)?;
             run_command_fn(lua)?;
             startup_fn(lua)?;
@@ -1219,7 +1127,7 @@ impl ScriptHost for LuaHost {
             }
             self.load_file(&path, editor)?;
         }
-        with_editor(&self.host_call, &self.lua, editor, |lua| {
+        with_editor(&self.lua, editor, |lua| {
             internals_table(lua)?;
             run_command_fn(lua)?;
             startup_fn(lua)?;
@@ -1240,20 +1148,20 @@ impl ScriptHost for LuaHost {
         &mut self,
         value: ResumeValue,
         editor: &mut Editor,
-    ) -> std::result::Result<ResumeOutcome, ResumeError> {
+    ) -> Result<CommandOutcome> {
         self.resume_coroutine(value, editor)
     }
 
     fn update_completion(&mut self, input: &str, editor: &mut Editor) -> Result<Vec<String>> {
-        let f = self.pending.last().and_then(|p| p.completion.clone());
+        let f = self.pending.as_ref().and_then(|p| p.completion.clone());
         let Some(f) = f else {
             return Ok(Vec::new());
         };
-        with_editor(&self.host_call, &self.lua, editor, |_lua| f.call(input))
+        with_editor(&self.lua, editor, |_lua| f.call(input))
     }
 
     fn run_startup(&mut self, path: Option<&str>, editor: &mut Editor) -> Result<()> {
-        with_editor(&self.host_call, &self.lua, editor, |lua| {
+        with_editor(&self.lua, editor, |lua| {
             let f = startup_fn(lua)?;
             match path {
                 Some(p) => f.call::<()>(p)?,

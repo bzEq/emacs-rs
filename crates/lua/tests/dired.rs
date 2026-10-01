@@ -270,7 +270,11 @@ fn yes_no_abort_returns_nil() {
     le.ed.buf_mut().move_to_line_start();
     le.command_confirming("dired-delete");
     // C-g: resume with nil
-    le.resume(emacs_core::script::ResumeValue::Bool(None));
+    let outcome = le
+        .ed
+        .resume_pending(emacs_core::script::ResumeValue::Bool(None))
+        .expect("resume");
+    assert!(le.ed.finish_command(outcome).is_none());
     assert!(
         std::fs::exists(t.0.join("f.txt")).unwrap(),
         "aborted delete"
@@ -282,6 +286,10 @@ fn yes_no_abort_returns_nil() {
 fn read_string_abort_returns_nil() {
     let mut le = LuaEd::new();
     le.command_reading("execute-extended-command");
-    le.resume(emacs_core::script::ResumeValue::String(None));
+    let outcome = le
+        .ed
+        .resume_pending(emacs_core::script::ResumeValue::String(None))
+        .expect("resume");
+    assert!(le.ed.finish_command(outcome).is_none());
     assert!(le.ed.pending().is_none(), "M-x aborted cleanly");
 }
