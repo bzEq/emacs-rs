@@ -1,17 +1,23 @@
 //! Per-window scroll state: the first visible *visual* row (long lines
-//! wrap to several visual rows) plus a cache that makes row computations
+//! wrap to several visual rows) plus caches that make row computations
 //! O(delta) for typical edits.
+
+use std::cell::Cell;
 
 use crate::buffer::Buffer;
 use crate::wrap;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct View {
     /// First visible visual row (0-based across the whole buffer).
     pub top_row: usize,
     /// Cache: the line whose rows-before was last computed.
     cached_line: usize,
     cached_rows_before: usize,
+    /// Render hint: the (row, line, segment, buffer length) of the last
+    /// rendered first row, so the renderer can skip to it in O(delta)
+    /// instead of walking every line from the top on each frame.
+    pub hint: Cell<(usize, usize, usize, usize)>,
 }
 
 impl Default for View {
@@ -20,6 +26,18 @@ impl Default for View {
             top_row: 0,
             cached_line: usize::MAX,
             cached_rows_before: 0,
+            hint: Cell::new((0, 0, 0, usize::MAX)),
+        }
+    }
+}
+
+impl Clone for View {
+    fn clone(&self) -> Self {
+        View {
+            top_row: self.top_row,
+            cached_line: self.cached_line,
+            cached_rows_before: self.cached_rows_before,
+            hint: Cell::new((0, 0, 0, usize::MAX)),
         }
     }
 }

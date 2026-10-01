@@ -53,6 +53,47 @@ fn matches_at(rope: &Rope, start: usize, q: &[QChar]) -> bool {
     true
 }
 
+/// Verify a candidate match at byte offset `pos`, comparing in-chunk bytes
+/// while both the query and the haystack are ASCII (the common case) and
+/// falling back to rope char comparisons otherwise. This is what makes
+/// searches over huge files fast: a query like "regclass" produces
+/// millions of first-char candidates, and most must be rejected as
+/// cheaply as possible.
+fn verify_at(rope: &Rope, chunk: &str, chunk_byte: usize, rel: usize, q: &[QChar]) -> bool {
+    let pos = chunk_byte + rel;
+    let bytes = chunk.as_bytes();
+    let mut j = 0usize;
+    let mut off = rel;
+    while j < q.len() {
+        let QChar::Ascii(lo) = q[j] else {
+            break;
+        };
+        if off >= bytes.len() || !bytes[off].is_ascii() {
+            break;
+        }
+        if bytes[off].to_ascii_lowercase() != lo {
+            return false;
+        }
+        j += 1;
+        off += 1;
+    }
+    if j == q.len() {
+        return true;
+    }
+    // the rest crosses a non-ASCII char or a chunk boundary: compare via
+    // the rope, in char offsets
+    let char_pos = rope.byte_to_char(pos);
+    for (k, qc) in q[j..].iter().enumerate() {
+        let Some(c) = rope.get_char(char_pos + j + k) else {
+            return false;
+        };
+        if !eq_ci(c, qc) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Find the first case-insensitive match of `query` at or after `from`.
 /// Returns the (start, end) char offsets of the match.
 pub fn find_forward(rope: &Rope, query: &str, from: usize) -> Option<(usize, usize)> {
@@ -80,8 +121,9 @@ pub fn find_forward(rope: &Rope, query: &str, from: usize) -> Option<(usize, usi
         let search = byte_from.saturating_sub(chunk_byte);
         let bytes = chunk.as_bytes();
         for rel in memchr::memchr2_iter(first, first_up, &bytes[search..]) {
-            let char_idx = rope.byte_to_char(chunk_byte + search + rel);
-            if matches_at(rope, char_idx, &q) {
+            let rel = search + rel;
+            if verify_at(rope, chunk, chunk_byte, rel, &q) {
+                let char_idx = rope.byte_to_char(chunk_byte + rel);
                 return Some((char_idx, char_idx + q.len()));
             }
         }
@@ -129,8 +171,8 @@ pub fn find_backward(rope: &Rope, query: &str, from: usize) -> Option<(usize, us
         let slice = &chunk.as_bytes()[..upto];
         let mut pos = memchr::memrchr2(first, first_up, slice);
         while let Some(rel) = pos {
-            let char_idx = rope.byte_to_char(chunk_byte + rel);
-            if matches_at(rope, char_idx, &q) {
+            if verify_at(rope, chunk, *chunk_byte, rel, &q) {
+                let char_idx = rope.byte_to_char(chunk_byte + rel);
                 return Some((char_idx, char_idx + q.len()));
             }
             if rel == 0 {

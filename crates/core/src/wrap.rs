@@ -32,36 +32,71 @@ pub fn visual_width(content: RopeSlice<'_>) -> usize {
 /// row of `width` columns, breaking at the last whitespace when possible.
 pub fn wrap_ranges(content: RopeSlice<'_>, width: usize) -> Vec<(usize, usize)> {
     let width = width.max(1);
-    let chars: Vec<char> = content.chars().collect();
-    if chars.is_empty() {
+    let n = content.len_chars();
+    if n == 0 {
         return vec![(0, 0)];
     }
     let mut out = Vec::new();
     let mut start = 0usize;
-    while start < chars.len() {
+    while start < n {
         let mut col = 0usize;
         let mut last_space: Option<usize> = None; // char index just past a whitespace
-        let mut i = start;
-        let mut end = chars.len();
-        while i < chars.len() {
-            let w = char_width(chars[i], col);
-            if col + w > width && i > start {
+        let mut end = n;
+        for (j, c) in content.slice(start..).chars().enumerate() {
+            let idx = start + j;
+            let w = char_width(c, col);
+            if col + w > width && idx > start {
                 end = match last_space {
                     Some(ls) if ls > start => ls,
-                    _ => i,
+                    _ => idx,
                 };
                 break;
             }
-            if chars[i].is_whitespace() {
-                last_space = Some(i + 1);
+            if c.is_whitespace() {
+                last_space = Some(idx + 1);
             }
             col += w;
-            i += 1;
         }
         out.push((start, end));
         start = end;
     }
     out
+}
+
+/// Count the visual rows of `content` at `width` without allocating any
+/// ranges (used when skipping lines during scroll walks, which must stay
+/// cheap: large files walk hundreds of thousands of lines per frame).
+pub fn row_count(content: RopeSlice<'_>, width: usize) -> usize {
+    let width = width.max(1);
+    let n = content.len_chars();
+    if n == 0 {
+        return 1;
+    }
+    let mut rows = 0usize;
+    let mut start = 0usize;
+    while start < n {
+        let mut col = 0usize;
+        let mut last_space: Option<usize> = None;
+        let mut end = n;
+        for (j, c) in content.slice(start..).chars().enumerate() {
+            let idx = start + j;
+            let w = char_width(c, col);
+            if col + w > width && idx > start {
+                end = match last_space {
+                    Some(ls) if ls > start => ls,
+                    _ => idx,
+                };
+                break;
+            }
+            if c.is_whitespace() {
+                last_space = Some(idx + 1);
+            }
+            col += w;
+        }
+        rows += 1;
+        start = end;
+    }
+    rows
 }
 
 /// The visual row (0-based, within the line) containing char column `col`.
@@ -74,11 +109,45 @@ pub fn row_in_line(content: RopeSlice<'_>, width: usize, col: usize) -> usize {
     0
 }
 
-/// Visual rows of the buffer lines in `from..to`.
+/// Visual rows of the buffer lines in `from..to`. Counts newlines with
+/// memchr; lines short enough to fit one visual row (the common case)
+/// cost O(1), only long lines are measured character by character.
 pub fn rows_between(buf: &Buffer, width: usize, from: usize, to: usize) -> usize {
+    let width = width.max(1);
+    let rope = buf.rope();
+    let len_lines = rope.len_lines();
+    let from = from.min(len_lines);
+    let to = to.min(len_lines);
+    if from >= to {
+        return 0;
+    }
+    let byte_from = rope.line_to_byte(from);
+    let byte_to = rope.line_to_byte(to);
     let mut rows = 0usize;
-    for l in from..to.min(buf.len_lines()) {
-        rows += wrap_ranges(buf.line(l), width).len();
+    let (chunks, mut chunk_byte, _, _) = rope.chunks_at_byte(byte_from);
+    let mut line_start = byte_from;
+    for chunk in chunks {
+        if chunk_byte >= byte_to {
+            break;
+        }
+        let bytes = chunk.as_bytes();
+        let upto = (byte_to - chunk_byte).min(bytes.len());
+        for rel in memchr::memchr_iter(b'\n', &bytes[..upto]) {
+            let line_end = chunk_byte + rel;
+            if line_end < line_start {
+                continue; // newline before the starting line
+            }
+            rows += if line_end - line_start <= width + 1 {
+                1 // short enough that it cannot wrap
+            } else {
+                row_count(rope.slice(line_start..line_end + 1), width)
+            };
+            line_start = line_end + 1;
+        }
+        chunk_byte += chunk.len();
+        if chunk_byte >= byte_to {
+            break;
+        }
     }
     rows
 }
@@ -95,13 +164,13 @@ pub fn row_of_point(buf: &Buffer, width: usize, point: usize) -> usize {
 /// buffer end).
 pub fn pos_at_row(buf: &Buffer, width: usize, row: usize) -> usize {
     let mut r = 0usize;
-    for l in 0..buf.len_lines() {
-        let ranges = wrap_ranges(buf.line(l), width);
-        if r + ranges.len() > row {
-            let (s, _) = ranges[row - r];
+    for (l, line) in buf.rope().lines().enumerate() {
+        let rows = row_count(line, width);
+        if r + rows > row {
+            let (s, _) = wrap_ranges(line, width)[row - r];
             return buf.rope().line_to_char(l) + s;
         }
-        r += ranges.len();
+        r += rows;
     }
     buf.len_chars()
 }
@@ -118,21 +187,75 @@ pub struct RowWalker<'a> {
 
 impl<'a> RowWalker<'a> {
     pub fn new(buf: &'a Buffer, width: usize, start_row: usize) -> Self {
-        let mut w = RowWalker {
-            buf,
-            width: width.max(1),
-            remaining: start_row,
-            line: 0,
-            ranges: Vec::new(),
-            seg: 0,
-        };
-        w.load();
-        w
+        Self::from_hint(buf, width, 0, 0, 0, start_row)
     }
 
-    /// Advance to the next line and skip remaining rows. Iterative: with
-    /// files of hundreds of thousands of lines, recursing per line would
-    /// overflow the stack.
+    /// Start at a known (line, segment) position at visual row `row` and
+    /// skip forward to `target_row`. O(delta) when the hint is fresh; the
+    /// caller validates the hint (buffer length unchanged, line in range,
+    /// row <= target).
+    pub fn from_hint(
+        buf: &'a Buffer,
+        width: usize,
+        row: usize,
+        line: usize,
+        seg: usize,
+        target_row: usize,
+    ) -> Self {
+        let width = width.max(1);
+        // the hint's row is the first *rendered* row; normalize to the
+        // row of the line's first segment
+        let line_row = row.saturating_sub(seg);
+        if target_row >= line_row {
+            // forward: position at the line start and skip the difference
+            let mut w = RowWalker {
+                buf,
+                width,
+                remaining: target_row - line_row,
+                line,
+                ranges: Vec::new(),
+                seg: 0,
+            };
+            w.load();
+            return w;
+        }
+        // backward: walk up line by line until the target lands inside a
+        // line (typically a short walk; scrolling backward far is rare)
+        let mut needed = line_row - target_row;
+        let mut cur = line;
+        while needed > 0 && cur > 0 {
+            cur -= 1;
+            let rows = row_count(buf.line(cur), width);
+            if rows >= needed {
+                let ranges = wrap_ranges(buf.line(cur), width);
+                let seg = (rows - needed).min(ranges.len().saturating_sub(1));
+                return RowWalker {
+                    buf,
+                    width,
+                    remaining: 0,
+                    line: cur,
+                    ranges,
+                    seg,
+                };
+            }
+            needed -= rows;
+        }
+        // above the buffer start: clamp to the very first row
+        let ranges = wrap_ranges(buf.line(0), width);
+        RowWalker {
+            buf,
+            width,
+            remaining: 0,
+            line: 0,
+            ranges,
+            seg: 0,
+        }
+    }
+
+    /// Advance to the next row position and skip remaining rows.
+    /// Iterative: with files of hundreds of thousands of lines, recursing
+    /// per line would overflow the stack. Row counts (not ranges) are
+    /// computed for fully skipped lines, so this stays cheap.
     fn load(&mut self) {
         loop {
             if self.line >= self.buf.len_lines() {
@@ -140,16 +263,72 @@ impl<'a> RowWalker<'a> {
                 self.seg = 0;
                 return;
             }
-            self.ranges = wrap_ranges(self.buf.line(self.line), self.width);
-            self.seg = 0;
-            let rows = self.ranges.len();
-            if self.remaining < rows {
-                self.seg = self.remaining;
+            if self.seg == 0 {
+                // skip whole lines via a memchr newline scan: short lines
+                // (the common case) are counted without measuring them
+                let width = self.width;
+                let byte_from = self
+                    .buf
+                    .rope()
+                    .line_to_byte(self.line.min(self.buf.len_lines()));
+                let (chunks, mut chunk_byte, _, _) = self.buf.rope().chunks_at_byte(byte_from);
+                let mut line_start = byte_from;
+                let mut lines = self.line;
+                let mut skip = self.remaining;
+                let mut landed = false;
+                'outer: for chunk in chunks {
+                    for rel in memchr::memchr_iter(b'\n', chunk.as_bytes()) {
+                        let line_end = chunk_byte + rel;
+                        if line_end < line_start {
+                            continue; // newline before the starting line
+                        }
+                        let rows = if line_end - line_start <= width + 1 {
+                            1
+                        } else {
+                            row_count(self.buf.rope().slice(line_start..line_end + 1), width)
+                        };
+                        if skip < rows {
+                            self.ranges = wrap_ranges(self.buf.line(lines), width);
+                            self.seg = skip;
+                            self.remaining = 0;
+                            self.line = lines;
+                            landed = true;
+                            break 'outer;
+                        }
+                        skip -= rows;
+                        lines += 1;
+                        line_start = line_end + 1;
+                    }
+                    chunk_byte += chunk.len();
+                }
+                if landed {
+                    return;
+                }
+                // the scan ended without landing: either the remaining
+                // rows ran out at the buffer end, or the last line has no
+                // trailing newline
+                self.line = lines;
+                if self.line < self.buf.len_lines() {
+                    self.ranges = wrap_ranges(self.buf.line(self.line), width);
+                    self.seg = 0;
+                    self.remaining = 0;
+                } else {
+                    self.ranges.clear();
+                    self.seg = 0;
+                }
+                return;
+            }
+            // mid-line: consume the rest of the current line's ranges
+            let left = self.ranges.len().saturating_sub(self.seg);
+            if self.remaining < left {
+                self.seg += self.remaining;
                 self.remaining = 0;
                 return;
             }
-            self.remaining -= rows;
+            self.remaining -= left;
             self.line += 1;
+            self.seg = 0;
+            self.ranges.clear();
         }
     }
 
@@ -164,6 +343,8 @@ impl<'a> RowWalker<'a> {
         self.seg += 1;
         if self.seg >= self.ranges.len() {
             self.line += 1;
+            self.seg = 0;
+            self.ranges.clear();
             self.load();
         }
         Some(out)

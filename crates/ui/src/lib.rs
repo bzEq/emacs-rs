@@ -61,13 +61,24 @@ fn render_window(
     };
     let width = text_rect.width.max(1) as usize;
     let region = buf.region();
-    let mut walker = RowWalker::new(buf, width, view.top_row);
+    // Use the previous frame's hint to skip to the first visible row in
+    // O(delta); validate it against the buffer length (edits invalidate).
+    let hint = view.hint.get();
+    let mut walker = if hint.3 == buf.len_chars() && hint.1 < buf.len_lines() {
+        RowWalker::from_hint(buf, width, hint.0, hint.1, hint.2, view.top_row)
+    } else {
+        RowWalker::new(buf, width, view.top_row)
+    };
     let mut lines: Vec<TuiLine> = Vec::new();
     let mut nums: Vec<TuiLine> = Vec::new();
+    let mut first: Option<(usize, usize)> = None;
     for _ in 0..text_rect.height as usize {
         let Some((line_idx, seg, s, e)) = walker.next_row() else {
             break;
         };
+        if first.is_none() {
+            first = Some((line_idx, seg));
+        }
         if line_numbers {
             // line numbers only on the first visual row of a wrapped line
             if seg == 0 {
@@ -80,6 +91,9 @@ fn render_window(
             }
         }
         lines.push(render_segment(buf, line_idx, s, e, region, search_match));
+    }
+    if let Some((line, seg)) = first {
+        view.hint.set((view.top_row, line, seg, buf.len_chars()));
     }
     if line_numbers && gutter_w > 0 && rect.width > gutter_w {
         let gutter = Rect {
@@ -374,12 +388,18 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         return None;
     }
     // find the cursor's visual row by walking the same wrapped rows that
-    // were rendered
+    // were rendered (reusing the view's hint, so this is O(delta), not a
+    // full walk from the top of the file every frame)
     let width = rect.width.max(1) as usize;
     let point = buf.point();
     let point_line = buf.line_of_point();
     let point_col = point - buf.rope().line_to_char(point_line);
-    let mut walker = RowWalker::new(buf, width, selected.view.top_row);
+    let hint = selected.view.hint.get();
+    let mut walker = if hint.3 == buf.len_chars() && hint.1 < buf.len_lines() {
+        RowWalker::from_hint(buf, width, hint.0, hint.1, hint.2, selected.view.top_row)
+    } else {
+        RowWalker::new(buf, width, selected.view.top_row)
+    };
     for i in 0..rect.height as usize {
         let Some((line_idx, _seg, s, e)) = walker.next_row() else {
             break;
