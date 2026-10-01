@@ -250,6 +250,43 @@ fn mx_minibuffer_handles_multibyte_input() {
 }
 
 #[test]
+fn find_file_relative_path_shows_absolute_directory() {
+    // `em a/b/c.cc` stores a relative path; find-file must still offer
+    // the absolute directory (Emacs behavior), so opening a sibling works
+    let em = Em::spawn();
+    let sub = em.scratch.join("a").join("b");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("c.cc"), "c\n").unwrap();
+    std::fs::write(sub.join("d.cc"), "d\n").unwrap();
+    let scratch = em.scratch.clone();
+    let mut em = Em::spawn_bin_in(
+        scratch,
+        &common::em_binary(),
+        Some(&em.scratch),
+        &[],
+        &["a/b/c.cc"],
+    );
+    assert!(em.wait_for("c.cc", 5000), "relative file opened");
+    em.keys(b"\x18\x06"); // C-x C-f
+    assert!(em.wait_for("Find file:", 4000), "minibuffer prompt opened");
+    // the pre-filled directory is absolute
+    let abs_dir = format!("{}/a/b/", em.scratch.display());
+    assert!(
+        em.wait_for_row(23, &abs_dir, 3000),
+        "absolute directory pre-filled: {abs_dir}"
+    );
+    // typing a sibling name resolves against that directory directly
+    em.type_str("d.cc");
+    em.keys(b"\r");
+    assert!(
+        em.wait_for("d\n", 5000) || em.wait_for("d.cc", 5000),
+        "sibling opened"
+    );
+    assert!(em.screen.row_text(0).starts_with("d"), "d.cc content shown");
+    em.quit();
+}
+
+#[test]
 fn find_file_defaults_to_buffer_file_directory() {
     let em = Em::spawn();
     let d = em.scratch.join("proj");

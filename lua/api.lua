@@ -352,7 +352,16 @@ function M.default_directory()
   local p = raw.path()
   if p then
     local parent = p:match("^(.*)/[^/]+$")
-    if parent then return parent end
+    if p:sub(1, 1) == "/" then
+      -- absolute path: the parent directory (or the root)
+      if parent then return parent end
+      return "/"
+    end
+    -- relative path: resolve against the working directory, so the
+    -- minibuffer shows an absolute directory (Emacs behavior)
+    if parent and parent ~= "" then
+      return raw.cwd() .. "/" .. parent
+    end
     return raw.cwd()
   end
   return raw.cwd()

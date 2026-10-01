@@ -223,11 +223,26 @@ impl Em {
     /// Spawn a specific binary (e.g. a copy of `em` in a bare directory,
     /// to prove the embedded Lua runtime needs no `lua/` next to it).
     pub fn spawn_bin(scratch: PathBuf, bin: &Path, envs: &[(&str, &str)], args: &[&str]) -> Self {
+        Self::spawn_bin_in(scratch, bin, None, envs, args)
+    }
+
+    /// Spawn a binary with a specific working directory (for relative-path
+    /// scenarios).
+    pub fn spawn_bin_in(
+        scratch: PathBuf,
+        bin: &Path,
+        cwd: Option<&Path>,
+        envs: &[(&str, &str)],
+        args: &[&str],
+    ) -> Self {
         let (master, slave) = openpty(24, 80);
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .env("XDG_CONFIG_HOME", scratch.join("cfg"))
             .env("TERM", "xterm-256color");
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
         for (k, v) in envs {
             cmd.env(k, v);
         }
