@@ -8,7 +8,7 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -391,6 +391,22 @@ impl Em {
         }
         let _ = self.child.kill();
         self.exited = self.child.wait().ok();
+    }
+
+    /// Send a signal to the em process.
+    pub fn signal(&mut self, sig: i32) {
+        unsafe { libc::kill(self.child.id() as i32, sig) };
+    }
+
+    /// Resize the pseudo-terminal (delivers SIGWINCH to em).
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let ws = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
     }
 
     /// Exit status once the process has ended (waits up to 5s for it).

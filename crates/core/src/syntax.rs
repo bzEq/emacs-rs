@@ -4,7 +4,6 @@
 use ropey::Rope;
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::buffer::Buffer;
 use crate::mode::Lang;
 
 /// Buffers larger than this (in chars) are never parsed.
@@ -28,6 +27,11 @@ pub enum Group {
 pub struct Syntax {
     pub lang: Lang,
     pub tree: Tree,
+    /// Per-line highlight segments, computed at parse time when the tree and
+    /// the text are consistent. Rendering reads only this cache, so a stale
+    /// tree (after edits, before the throttled re-parse) can never cause a
+    /// byte/char conversion panic.
+    lines: Vec<Vec<Segment>>,
 }
 
 pub fn parse(lang: Lang, text: &str) -> Option<Syntax> {
@@ -39,7 +43,11 @@ pub fn parse(lang: Lang, text: &str) -> Option<Syntax> {
     };
     parser.set_language(&language).ok()?;
     let tree = parser.parse(text, None)?;
-    Some(Syntax { lang, tree })
+    let rope = Rope::from_str(text);
+    let lines = (0..rope.len_lines())
+        .map(|line_idx| line_segments_raw(&tree, lang, &rope, line_idx))
+        .collect();
+    Some(Syntax { lang, tree, lines })
 }
 
 /// Whether a node kind is a comment or a string, per language.
@@ -175,7 +183,7 @@ fn collect(
     start_byte: usize,
     end_byte: usize,
     line_start_char: usize,
-    buf: &Buffer,
+    rope: &Rope,
     out: &mut Vec<RawSeg>,
     depth: usize,
 ) {
@@ -189,8 +197,8 @@ fn collect(
     let mut push_range = |s: usize, e: usize, g: Group| {
         let s = s.clamp(nb, ne);
         let e = e.clamp(nb, ne);
-        let sc = buf.rope().byte_to_char(s).saturating_sub(line_start_char);
-        let ec = buf.rope().byte_to_char(e).saturating_sub(line_start_char);
+        let sc = rope.byte_to_char(s).saturating_sub(line_start_char);
+        let ec = rope.byte_to_char(e).saturating_sub(line_start_char);
         if ec > sc {
             out.push(RawSeg {
                 start: sc,
@@ -229,7 +237,7 @@ fn collect(
             start_byte,
             end_byte,
             line_start_char,
-            buf,
+            rope,
             out,
             depth + 1,
         );
@@ -238,23 +246,33 @@ fn collect(
 
 /// Highlight segments for one line. Deeper (more specific) nodes win over
 /// their ancestors.
-pub fn line_segments(syntax: &Syntax, buf: &Buffer, line_idx: usize) -> Vec<Segment> {
-    let line_start_char = buf.rope().line_to_char(line_idx);
-    let line_end_char = line_start_char + buf.line_len_chars(line_idx);
+fn line_segments_raw(tree: &Tree, lang: Lang, rope: &Rope, line_idx: usize) -> Vec<Segment> {
+    let line_start_char = rope.line_to_char(line_idx);
+    let line_len = {
+        let s = rope.line(line_idx);
+        let mut len = s.len_chars();
+        if len >= 2 && s.char(len - 1) == '\n' && s.char(len - 2) == '\r' {
+            len -= 2;
+        } else if len > 0 && s.char(len - 1) == '\n' {
+            len -= 1;
+        }
+        len
+    };
+    let line_end_char = line_start_char + line_len;
     if line_end_char <= line_start_char {
         return Vec::new();
     }
-    let start_byte = buf.rope().char_to_byte(line_start_char);
-    let end_byte = buf.rope().char_to_byte(line_end_char);
+    let start_byte = rope.char_to_byte(line_start_char);
+    let end_byte = rope.char_to_byte(line_end_char);
 
     let mut raw = Vec::new();
     collect(
-        syntax.tree.root_node(),
-        syntax.lang,
+        tree.root_node(),
+        lang,
         start_byte,
         end_byte,
         line_start_char,
-        buf,
+        rope,
         &mut raw,
         0,
     );
@@ -281,9 +299,17 @@ pub fn line_segments(syntax: &Syntax, buf: &Buffer, line_idx: usize) -> Vec<Segm
     filled
 }
 
+/// Highlight segments for one line, from the parse-time cache (see `Syntax`).
+/// Lines added by edits after the last parse have no highlights until the
+/// next re-parse.
+pub fn line_segments(syntax: &Syntax, line_idx: usize) -> Vec<Segment> {
+    syntax.lines.get(line_idx).cloned().unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::Buffer;
 
     fn buf_with(name: &str, text: &str) -> Buffer {
         let mut b = Buffer::from_reader(name, text.as_bytes()).unwrap();
@@ -302,7 +328,7 @@ mod tests {
     #[test]
     fn rust_keyword_and_comment() {
         let b = buf_with("t.rs", "fn main() { // hi\n}\n");
-        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        let segs = line_segments(b.syntax().unwrap(), 0);
         assert!(segs.iter().any(|s| s.group == Group::Keyword));
         assert!(segs.iter().any(|s| s.group == Group::Comment));
         // "fn" at cols 0-2
@@ -313,7 +339,7 @@ mod tests {
     #[test]
     fn rust_string() {
         let b = buf_with("t.rs", r#"let x = "hello";"#);
-        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        let segs = line_segments(b.syntax().unwrap(), 0);
         let s = segs.iter().find(|s| s.group == Group::String).unwrap();
         assert_eq!(&b.rope().to_string()[s.start..s.end], "\"hello\"");
     }
@@ -321,7 +347,7 @@ mod tests {
     #[test]
     fn lua_keywords() {
         let b = buf_with("t.lua", "local function f() return 42 end");
-        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        let segs = line_segments(b.syntax().unwrap(), 0);
         let kw = segs.iter().filter(|s| s.group == Group::Keyword).count();
         assert!(kw >= 3, "local/function/return/end");
         assert!(segs.iter().any(|s| s.group == Group::Number));
@@ -330,7 +356,7 @@ mod tests {
     #[test]
     fn function_name_colored() {
         let b = buf_with("t.rs", "fn hello() {}\n");
-        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        let segs = line_segments(b.syntax().unwrap(), 0);
         assert!(
             segs.iter()
                 .any(|s| s.group == Group::Function && s.start == 3 && s.end == 8),
@@ -341,7 +367,7 @@ mod tests {
     #[test]
     fn cpp_keywords_strings_comments() {
         let b = buf_with("t.inc", "int main() { return 42; } // hi\n");
-        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        let segs = line_segments(b.syntax().unwrap(), 0);
         assert!(segs.iter().any(|s| s.group == Group::Keyword), "return");
         assert!(segs.iter().any(|s| s.group == Group::Comment));
         assert!(segs.iter().any(|s| s.group == Group::Number));
@@ -355,7 +381,7 @@ mod tests {
     #[test]
     fn cpp_function_name_colored() {
         let b = buf_with("t.cpp", "int greet() { return 0; }\n");
-        let segs = line_segments(b.syntax().unwrap(), &b, 0);
+        let segs = line_segments(b.syntax().unwrap(), 0);
         assert!(
             segs.iter().any(|s| s.group == Group::Function && {
                 let text = b.rope().to_string();

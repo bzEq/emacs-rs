@@ -10,6 +10,7 @@ M.define("describe-key", function()
   local keys = {}
   while true do
     local k = emacs.read_key()
+    if k == "C-g" then return end -- abort silently
     keys[#keys + 1] = k
     local seq = table.concat(keys, " ")
     local status, cmd = raw.lookup_key(seq)

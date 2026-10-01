@@ -119,11 +119,23 @@ impl Buffer {
         let path = self.path.as_ref().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "buffer has no file name")
         })?;
-        let mut file = File::create(path)?;
-        for chunk in self.rope.chunks() {
-            file.write_all(chunk.as_bytes())?;
+        // write to a temp file in the same directory, then rename over the
+        // original, so an error or crash mid-write never truncates it
+        let tmp = path.with_extension("emtmp");
+        let written = (|| {
+            let mut file = File::create(&tmp)?;
+            for chunk in self.rope.chunks() {
+                file.write_all(chunk.as_bytes())?;
+            }
+            file.sync_all()
+        })();
+        match written {
+            Ok(()) => std::fs::rename(&tmp, path),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
         }
-        Ok(())
     }
 
     pub fn name(&self) -> &str {
@@ -269,7 +281,8 @@ impl Buffer {
         self.point - line_start
     }
 
-    /// The text of the given line without the trailing `\r`/`\n`.
+    /// The text of the given line. Note: ropey's `line` *includes* the
+    /// trailing `\r`/`\n`; use `line_len_chars` for the visible length.
     pub fn line(&self, idx: usize) -> ropey::RopeSlice<'_> {
         self.rope.line(idx.min(self.rope.len_lines() - 1))
     }
@@ -425,7 +438,8 @@ impl Buffer {
         self.syntax_dirty |= self.mode.lang.is_some();
     }
 
-    /// Insert `text` at `pos` (not necessarily point); point is unchanged.
+    /// Insert `text` at `pos` (not necessarily point); point and mark shift
+    /// with the edit when they lie after `pos`.
     pub fn insert_at(&mut self, pos: usize, text: &str) {
         let pos = pos.min(self.rope.len_chars());
         let len = text.chars().count();
@@ -441,6 +455,7 @@ impl Buffer {
         if self.point > pos {
             self.point += len;
         }
+        self.goal_column = None;
         self.modified = true;
         self.syntax_dirty |= self.mode.lang.is_some();
     }

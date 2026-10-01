@@ -304,3 +304,53 @@ fn find_file_minibuffer_scrolls_long_inputs() {
     assert!(em.wait_for("hi", 5000), "file opened");
     em.quit();
 }
+
+#[test]
+fn nested_find_file_from_mx_prompt_restores_prompt() {
+    let scratch = common::scratch_dir();
+    let f = write_file(&scratch, "t.txt", "hello\n");
+    let mut em = Em::spawn_with_scratch(scratch, &[]);
+    assert!(em.wait_for("lines", 5000), "editor ready");
+    em.keys(b"\x1bx"); // M-x prompt
+    assert!(em.wait_for("M-x", 5000), "M-x prompt shown");
+    em.type_str("forw"); // partial input in the outer prompt
+    em.keys(b"\x18\x06"); // C-x C-f runs from inside the prompt
+    assert!(em.wait_for("Find file:", 5000), "nested find-file prompt");
+    em.type_str(&f.display().to_string());
+    em.keys(b"\r");
+    assert!(em.wait_for("hello", 5000), "nested command completed");
+    // the outer M-x read is restored with its previous input
+    assert!(
+        em.wait_for("forw", 2000),
+        "outer prompt restored with its input"
+    );
+    em.keys(b"\x07"); // C-g aborts the outer read
+    assert!(em.wait_for("Quit", 2000), "aborted cleanly");
+    em.signal(libc::SIGTERM);
+    let _ = em.exit_status();
+}
+
+#[test]
+fn tiny_terminal_survives_resize_while_completing() {
+    let mut em = Em::spawn();
+    assert!(em.wait_for("lines", 5000), "editor ready");
+    em.keys(b"\x1bx"); // M-x prompt with completion candidates
+    assert!(em.wait_for("M-x", 5000), "M-x prompt shown");
+    em.type_str("save");
+    assert!(em.wait_for("save", 2000), "minibuffer input shown");
+    em.resize(1, 80); // one row: echo area collapses to a single line
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    em.type_str("x");
+    assert!(
+        em.wait_for("savex", 3000),
+        "editor survives a 1-row terminal while completing"
+    );
+    em.resize(24, 80);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        em.wait_for("savex", 2000),
+        "editor redraws after resize back"
+    );
+    em.signal(libc::SIGTERM);
+    let _ = em.exit_status();
+}

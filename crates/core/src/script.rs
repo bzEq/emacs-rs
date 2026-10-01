@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use crate::editor::Editor;
 use crate::key::Key;
+use crate::minibuffer::Minibuffer;
 
 /// What a suspended command coroutine is waiting for. The event loop routes
 /// keys to the matching handler until the coroutine is resumed.
@@ -44,6 +45,31 @@ pub enum CommandOutcome {
     Pending(PendingRequest),
 }
 
+/// The read state a nested command interrupted (an outer minibuffer read).
+/// When the interrupting command's own read finishes or errors, this state
+/// is reinstalled so the outer command can resume.
+#[derive(Debug, Clone)]
+pub struct RestoreInfo {
+    pub request: PendingRequest,
+    pub minibuffer: Option<Minibuffer>,
+}
+
+/// The result of resuming a suspended command coroutine: the outcome plus,
+/// when the resumed command finished, the state of an outer read to restore.
+#[derive(Debug)]
+pub struct ResumeOutcome {
+    pub outcome: CommandOutcome,
+    pub restore: Option<RestoreInfo>,
+}
+
+/// A failed resume, carrying any outer read state that must be restored so
+/// the interrupted command can continue after the error is reported.
+#[derive(Debug)]
+pub struct ResumeError {
+    pub error: anyhow::Error,
+    pub restore: Option<Box<RestoreInfo>>,
+}
+
 pub trait ScriptHost {
     /// Load a script file (a Lua chunk).
     fn load_file(&mut self, path: &Path, editor: &mut Editor) -> Result<()>;
@@ -67,8 +93,11 @@ pub trait ScriptHost {
     ) -> Result<CommandOutcome>;
 
     /// Resume a suspended command coroutine with the requested input.
-    fn resume_pending(&mut self, value: ResumeValue, editor: &mut Editor)
-        -> Result<CommandOutcome>;
+    fn resume_pending(
+        &mut self,
+        value: ResumeValue,
+        editor: &mut Editor,
+    ) -> std::result::Result<ResumeOutcome, ResumeError>;
 
     /// Recompute minibuffer completion candidates for the current input.
     fn update_completion(&mut self, input: &str, editor: &mut Editor) -> Result<Vec<String>>;
@@ -106,8 +135,11 @@ impl ScriptHost for NullHost {
         &mut self,
         _value: ResumeValue,
         _editor: &mut Editor,
-    ) -> Result<CommandOutcome> {
-        Ok(CommandOutcome::Done)
+    ) -> std::result::Result<ResumeOutcome, ResumeError> {
+        Ok(ResumeOutcome {
+            outcome: CommandOutcome::Done,
+            restore: None,
+        })
     }
 
     fn update_completion(&mut self, _input: &str, _editor: &mut Editor) -> Result<Vec<String>> {

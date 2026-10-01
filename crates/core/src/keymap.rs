@@ -33,7 +33,9 @@ impl Keymap {
     }
 
     /// Bind a full key sequence to a command, creating prefix keymaps as
-    /// needed. Passing an empty sequence is a no-op.
+    /// needed. Rebinding a key that is already a prefix replaces the whole
+    /// subtree (Emacs silently replaces bindings). Passing an empty
+    /// sequence is a no-op.
     pub fn bind_sequence(&mut self, seq: &[Key], command: impl Into<String>) {
         match seq {
             [] => {}
@@ -41,19 +43,16 @@ impl Keymap {
                 self.bindings.insert(*key, Action::Command(command.into()));
             }
             [key, rest @ ..] => {
-                let child = match self.bindings.entry(*key) {
-                    std::collections::hash_map::Entry::Occupied(e) => match e.into_mut() {
-                        Action::Prefix(p) => p,
-                        Action::Command(_) => panic!("key {key} already bound to a command"),
-                    },
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        match e.insert(Action::Prefix(Keymap::new())) {
-                            Action::Prefix(p) => p,
-                            _ => unreachable!(),
-                        }
-                    }
-                };
-                child.bind_sequence(rest, command);
+                if !matches!(self.bindings.get(key), Some(Action::Prefix(_))) {
+                    // the key was unbound or a command and becomes a prefix;
+                    // a previous command binding is dropped (Emacs replaces
+                    // bindings silently)
+                    self.bindings.insert(*key, Action::Prefix(Keymap::new()));
+                }
+                match self.bindings.get_mut(key) {
+                    Some(Action::Prefix(p)) => p.bind_sequence(rest, command),
+                    _ => unreachable!(),
+                }
             }
         }
     }
@@ -141,5 +140,32 @@ mod tests {
         let flat = km.flatten();
         assert_eq!(flat.len(), 2);
         assert!(flat.contains(&(parse_sequence("C-x C-f").unwrap(), "find-file".into())));
+    }
+
+    #[test]
+    fn rebinding_prefix_replaces_subtree() {
+        let mut km = Keymap::new();
+        km.bind_sequence(&parse_sequence("C-x C-f").unwrap(), "find-file");
+        km.bind(Key::ctrl('x'), "other");
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x").unwrap()),
+            Lookup::Command("other".into())
+        );
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x C-f").unwrap()),
+            Lookup::Unbound,
+            "the replaced prefix subtree is gone"
+        );
+    }
+
+    #[test]
+    fn rebinding_command_as_prefix() {
+        let mut km = Keymap::new();
+        km.bind(Key::ctrl('x'), "other");
+        km.bind_sequence(&parse_sequence("C-x C-f").unwrap(), "find-file");
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x C-f").unwrap()),
+            Lookup::Command("find-file".into())
+        );
     }
 }

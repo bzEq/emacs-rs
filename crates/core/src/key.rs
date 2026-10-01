@@ -193,6 +193,13 @@ fn parse_key(token: &str) -> Result<Key, String> {
             if chars.next().is_some() {
                 return Err(format!("unknown key: {token}"));
             }
+            // control characters arrive from the terminal lowercased
+            // (C-x, not C-X); normalize so bindings like "C-X" still work
+            let c = if mods.contains(Modifiers::CONTROL) && c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                c
+            };
             KeyCode::Char(c)
         }
     };

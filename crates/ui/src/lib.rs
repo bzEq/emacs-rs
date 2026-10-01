@@ -128,7 +128,7 @@ fn render_line(buf: &emacs_core::buffer::Buffer, line_idx: usize) -> TuiLine<'st
     let has_tab = content.chars().any(|c| c == '\t');
     let segs = buf
         .syntax()
-        .map(|s| line_segments(s, buf, line_idx))
+        .map(|s| line_segments(s, line_idx))
         .unwrap_or_default();
     if has_tab || segs.is_empty() {
         return TuiLine::from(plain);
@@ -193,7 +193,9 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     let completing = ed
         .minibuffer()
         .is_some_and(|mb| mb.completion && !mb.candidates.is_empty() && mb.candidates.len() >= 2);
-    let echo_h: u16 = if completing { 2 } else { 1 };
+    // On tiny terminals (1-2 rows) the echo area keeps a single line so the
+    // arithmetic below can never underflow.
+    let echo_h: u16 = if completing && area.height > 2 { 2 } else { 1 };
 
     let body_h = area.height.saturating_sub(1 + echo_h);
     let modeline_rect = Rect {

@@ -56,9 +56,18 @@ function M.open_file(path)
     raw.select_buffer(id)
     return
   end
-  local ok, newid = pcall(raw.open_file, path)
+  local ok, err = pcall(raw.open_file, path)
   if not ok then
-    emacs.error("cannot open " .. path .. ": " .. tostring(newid))
+    if raw.canonicalize(path) == nil and not raw.is_dir(path) then
+      -- Emacs creates the file: find-file on a new path opens a buffer
+      local name = path:match("([^/]+)$") or path
+      local newid = raw.new_buffer(name)
+      raw.set_buffer_path(newid, path)
+      raw.select_buffer(newid)
+      raw.set_buffer_mode(M.mode_for_path(path))
+      return
+    end
+    emacs.error("cannot open " .. path .. ": " .. tostring(err))
     return
   end
   raw.set_buffer_mode(M.mode_for_path(path))
@@ -67,18 +76,25 @@ end
 function M.save_buffer_at_id(id)
   if not raw.buffer_info(id).path then
     local name = emacs.read_string("File to save in: ", nil)
-    if not name or name == "" then return false end
+    if not name or name:match("^%s*$") then return false end
     raw.set_buffer_path(id, name)
     raw.set_buffer_name(id, name:match("([^/]+)$") or name)
   end
+  -- run the hooks with the buffer being saved selected, so hooks that
+  -- inspect the current buffer see the right one
+  local cur = raw.id()
+  if cur ~= id then raw.select_buffer(id) end
   M.run_hook("before_save")
   local ok, err = pcall(raw.save_buffer_to_disk, id)
+  if ok then
+    raw.set_buffer_modified(id, false)
+    M.run_hook("after_save")
+  end
+  if cur ~= id then raw.select_buffer(cur) end
   if not ok then
     emacs.error("Cannot save: " .. tostring(err))
     return false
   end
-  raw.set_buffer_modified(id, false)
-  M.run_hook("after_save")
   emacs.message("Wrote " .. (raw.buffer_info(id).path or ""))
   return true
 end
@@ -102,7 +118,7 @@ M.define("find-file", function()
     initial = initial .. "/"
   end
   local name = emacs.read_string("Find file: ", M.complete_file_names, initial)
-  if not name or name:match("^%s*$") == "" then return end
+  if not name or name:match("^%s*$") then return end
   local trimmed = name:match("^%s*(.-)%s*$")
   local expanded = raw.expand_tilde(trimmed)
   local path
@@ -128,7 +144,8 @@ M.define("write-file", function()
   local id = raw.id()
   local default = raw.buffer_info(id).path or ""
   local name = emacs.read_string("Write file: " .. default .. " ", nil)
-  if not name or name == "" then return end
+  if not name or name:match("^%s*$") then return end
+  name = name:match("^%s*(.-)%s*$")
   raw.set_buffer_path(id, name)
   raw.set_buffer_name(id, name:match("([^/]+)$") or name)
   M.save_buffer_at_id(id)
@@ -166,9 +183,11 @@ M.define("kill-buffer", function()
   if raw.buffer_info(target).modified then
     local yes = emacs.read_yes_no("Buffer " .. name .. " modified; kill anyway? (y/n)")
     if yes then
+      M.cleanup_buffer(target)
       raw.kill_buffer(target)
     end
   else
+    M.cleanup_buffer(target)
     raw.kill_buffer(target)
   end
 end, "Kill a buffer.")
@@ -190,7 +209,7 @@ M.define("save-buffers-kill-terminal", function()
     local yes = emacs.read_yes_no("Buffer " .. name .. " modified; save it? (y/n)")
     if yes == nil then return end
     if yes then
-      M.save_buffer_at_id(id)
+      if not M.save_buffer_at_id(id) then return end
     end
     confirm_all(idx + 1)
   end
