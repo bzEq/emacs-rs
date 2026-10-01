@@ -800,6 +800,14 @@ impl Editor {
         out
     }
 
+    /// C-g deactivates the mark of the buffer shown in the selected
+    /// window (quitting cancels the active region; the mark position is
+    /// kept, so C-x C-x can reactivate it).
+    pub fn deactivate_mark(&mut self) {
+        let idx = self.selected_buffer_index();
+        self.buffers[idx].deactivate_mark();
+    }
+
     /// Recompute minibuffer completion candidates through the script host.
     pub fn update_completion(&mut self, input: &str) -> Result<Vec<String>> {
         let mut out = Ok(Vec::new());

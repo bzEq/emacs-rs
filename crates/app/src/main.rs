@@ -388,6 +388,7 @@ fn pending_key(ed: &mut Editor, key: Key) -> Result<()> {
                 _ => return Ok(()),
             };
             if answer.is_none() {
+                ed.deactivate_mark();
                 ed.message("Quit");
                 return resume(ed, ResumeValue::Bool(None));
             }
@@ -412,6 +413,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
     // structural keys: abort, accept, complete
     if matches!(key.code, Char('g') if m.contains(Modifiers::CONTROL)) {
         ed.clear_pending_keys();
+        ed.deactivate_mark();
         ed.message("Quit");
         return resume(ed, ResumeValue::String(None));
     }

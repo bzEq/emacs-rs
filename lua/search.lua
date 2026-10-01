@@ -64,6 +64,7 @@ function isearch.run(forward)
     local key = emacs.read_key()
     if key == "C-g" then
       raw.set_point(start)
+      raw.deactivate_mark()
       emacs.message("Quit")
       return
     elseif key == "C-s" then

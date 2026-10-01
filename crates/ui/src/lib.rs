@@ -85,7 +85,7 @@ fn render_window(frame: &mut Frame, buf: &emacs_core::buffer::Buffer, view: &Vie
     let lines: Vec<TuiLine> = (0..text_rect.height as usize)
         .filter_map(|i| {
             let line_idx = view.top_line + i;
-            (line_idx < buf.len_lines()).then(|| render_line(buf, line_idx))
+            (line_idx < buf.len_lines()).then(|| render_line(buf, line_idx, buf.region()))
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), text_rect);
@@ -118,8 +118,14 @@ fn slice_cols(s: &str, a: usize, b: usize) -> &str {
 }
 
 /// One line with syntax highlighting. Lines containing tabs are rendered
-/// plain (tab expansion would shift highlight columns).
-fn render_line(buf: &emacs_core::buffer::Buffer, line_idx: usize) -> TuiLine<'static> {
+/// plain (tab expansion would shift highlight columns). When the mark is
+/// set, the columns between point and mark get the active-region
+/// background (Emacs transient-mark-mode).
+fn render_line(
+    buf: &emacs_core::buffer::Buffer,
+    line_idx: usize,
+    region: Option<(usize, usize)>,
+) -> TuiLine<'static> {
     let content = visible_content(buf.line(line_idx));
     if content.len_chars() == 0 {
         return TuiLine::from("");
@@ -130,7 +136,8 @@ fn render_line(buf: &emacs_core::buffer::Buffer, line_idx: usize) -> TuiLine<'st
         .syntax()
         .map(|s| line_segments(s, buf, line_idx))
         .unwrap_or_default();
-    if has_tab || segs.is_empty() {
+    if has_tab {
+        // tab expansion shifts highlight columns; render plain
         return TuiLine::from(plain);
     }
     let total = plain.chars().count();
@@ -154,7 +161,54 @@ fn render_line(buf: &emacs_core::buffer::Buffer, line_idx: usize) -> TuiLine<'st
     if last < total {
         spans.push(Span::raw(slice_cols(&plain, last, total).to_string()));
     }
+    if let Some((rs, re)) = region {
+        let line_start = buf.rope().line_to_char(line_idx);
+        let line_end = line_start + buf.line_len_chars(line_idx);
+        let r_start = rs.max(line_start).saturating_sub(line_start);
+        let r_end = re.min(line_end).saturating_sub(line_start);
+        if r_end > r_start {
+            spans = overlay_region(spans, r_start, r_end);
+        }
+    }
     TuiLine::from(spans)
+}
+
+/// Split `spans` at the region's column range and give the columns inside
+/// the range the active-region background.
+fn overlay_region(
+    spans: Vec<Span<'static>>,
+    region_start: usize,
+    region_end: usize,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+    for span in spans {
+        let len = span.content.chars().count();
+        let (s, e) = (col, col + len);
+        let rs = region_start.max(s);
+        let re = region_end.min(e);
+        if re > rs {
+            let before = slice_cols(&span.content, 0, rs - s);
+            let inside = slice_cols(&span.content, rs - s, re - s);
+            let after = slice_cols(&span.content, re - s, len);
+            if !before.is_empty() {
+                out.push(Span::styled(before.to_string(), span.style));
+            }
+            if !inside.is_empty() {
+                out.push(Span::styled(
+                    inside.to_string(),
+                    span.style.bg(Color::LightBlue),
+                ));
+            }
+            if !after.is_empty() {
+                out.push(Span::styled(after.to_string(), span.style));
+            }
+        } else {
+            out.push(span);
+        }
+        col = e;
+    }
+    out
 }
 
 /// Modeline for a buffer, Emacs-style: `--`/`**` + `%` for read-only, name,

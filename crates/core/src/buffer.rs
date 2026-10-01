@@ -39,8 +39,12 @@ pub struct Buffer {
     /// horizontal move.
     goal_column: Option<usize>,
     modified: bool,
-    /// The mark, if set (C-SPC).
+    /// The mark position, if set (C-SPC). The position persists across
+    /// deactivation (Emacs keeps the mark; C-x C-x can reactivate it).
     mark: Option<usize>,
+    /// Whether the mark is *active*: active marks highlight the region
+    /// between point and mark (transient-mark-mode). C-g deactivates.
+    mark_active: bool,
     /// True when the buffer content should be treated as read-only
     /// (used for *Help* and dired listings).
     read_only: bool,
@@ -71,6 +75,7 @@ impl Clone for Buffer {
             goal_column: self.goal_column,
             modified: self.modified,
             mark: self.mark,
+            mark_active: self.mark_active,
             read_only: self.read_only,
             mode: self.mode.clone(),
             local_keymap: self.local_keymap.clone(),
@@ -93,6 +98,7 @@ impl Buffer {
             goal_column: None,
             modified: false,
             mark: None,
+            mark_active: false,
             read_only: false,
             mode: fundamental(),
             local_keymap: None,
@@ -117,6 +123,7 @@ impl Buffer {
             goal_column: None,
             modified: false,
             mark: None,
+            mark_active: false,
             read_only: false,
             mode: fundamental(),
             local_keymap: None,
@@ -190,13 +197,34 @@ impl Buffer {
         self.mark
     }
 
+    /// Set the mark position and activate it (Emacs `set-mark-command`).
     pub fn set_mark(&mut self, m: Option<usize>) {
         self.mark = m.map(|m| m.min(self.rope.len_chars()));
+        self.mark_active = m.is_some();
     }
 
-    /// Ordered (start, end) of the region between mark and point, if the mark
-    /// is set and the region is non-empty.
+    pub fn mark_active(&self) -> bool {
+        self.mark_active
+    }
+
+    /// Deactivate the mark: the region stops being highlighted, but the
+    /// mark position is kept (C-x C-x can reactivate it).
+    pub fn deactivate_mark(&mut self) {
+        self.mark_active = false;
+    }
+
+    pub fn activate_mark(&mut self) {
+        if self.mark.is_some() {
+            self.mark_active = true;
+        }
+    }
+
+    /// Ordered (start, end) of the active region between mark and point,
+    /// if the mark is set, active, and the region is non-empty.
     pub fn region(&self) -> Option<(usize, usize)> {
+        if !self.mark_active {
+            return None;
+        }
         let m = self.mark?;
         if m == self.point {
             return None;

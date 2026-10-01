@@ -189,6 +189,7 @@ M.define("kill-region", function()
     error("The mark is not set now, so there is no region")
   end
   M.kill(emacs.delete_range(s, e))
+  raw.deactivate_mark()
 end, "Kill the text between point and mark.")
 
 M.define("kill-ring-save", function()
@@ -236,8 +237,15 @@ M.define("undo", function()
 end, "Undo the last change.")
 
 M.define("set-mark-command", function()
-  raw.set_mark(raw.point())
-  emacs.message("Mark set")
+  local p = raw.point()
+  if raw.mark_active() and raw.mark() == p then
+    -- C-SPC C-SPC: deactivate the mark (Emacs toggles)
+    raw.deactivate_mark()
+    emacs.message("Mark deactivated")
+  else
+    raw.set_mark(p)
+    emacs.message("Mark set")
+  end
 end, "Set the mark where point is.")
 
 local function goto_line_number(n)
@@ -267,10 +275,12 @@ end, "Move point to the beginning of a line, setting the mark.")
 
 M.define("exchange-point-and-mark", function()
   raw.exchange_point_and_mark()
-end, "Swap point and mark.")
+  raw.activate_mark()
+end, "Swap point and mark, reactivating the mark.")
 
 M.define("keyboard-quit", function()
   M.prefix = { digits = nil, negative = false, universal = 0 }
+  raw.deactivate_mark()
   emacs.message("Quit")
 end, "Abort the current operation.")
 

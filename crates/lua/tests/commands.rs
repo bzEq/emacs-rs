@@ -221,3 +221,50 @@ fn self_insert_rejects_read_only_buffer() {
     assert_eq!(le.text(), "x", "nothing inserted");
     assert_eq!(le.ed.echo(), Some("Buffer is read-only"));
 }
+
+#[test]
+fn keyboard_quit_deactivates_but_keeps_the_mark() {
+    let mut le = editor_with("hello world");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    assert_eq!(le.ed.buf().region(), Some((0, 1)), "region active");
+    le.run("keyboard-quit");
+    assert_eq!(le.ed.buf().region(), None, "C-g deactivates the region");
+    assert_eq!(
+        le.ed.buf().mark(),
+        Some(0),
+        "the mark position survives C-g"
+    );
+    // C-x C-x reactivates it
+    le.run("exchange-point-and-mark");
+    assert_eq!(le.ed.buf().region(), Some((0, 1)), "C-x C-x reactivates");
+}
+
+#[test]
+fn set_mark_twice_at_point_deactivates() {
+    let mut le = editor_with("hello");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    assert!(le.ed.buf().mark_active());
+    le.run("set-mark-command");
+    assert!(
+        !le.ed.buf().mark_active(),
+        "second C-SPC at point deactivates"
+    );
+    assert_eq!(le.ed.buf().region(), None);
+}
+
+#[test]
+fn kill_region_deactivates_the_mark() {
+    let mut le = editor_with("hello");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed.buf_mut().move_to_buffer_end();
+    assert_eq!(le.ed.buf().region(), Some((0, 5)));
+    le.run("kill-region");
+    assert_eq!(le.ed.buf().region(), None, "kill-region deactivates");
+    assert_eq!(le.text(), "");
+}

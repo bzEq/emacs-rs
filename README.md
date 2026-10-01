@@ -60,6 +60,8 @@ directory, so users can redefine any part of the editor from their
     `C-g` aborts
   - Undo (with boundaries), kill ring (consecutive kills accumulate),
     prefix arguments (`C-u`/`C-3`) — all implemented in Lua
+  - Active region: after `C-SPC` the text between point and mark is
+    highlighted (transient-mark-mode), and `C-w`/`M-w` act on it
   - CRLF files follow Emacs semantics (`\r\n` acts as a single newline)
 - **Window system**: `C-x 2/3` splits, `C-x 0/1` deletes, `C-x o` cycles;
   each window keeps its own point and scroll position

@@ -317,6 +317,24 @@ impl LuaHost {
             })?,
         )?;
         raw.set(
+            "mark_active",
+            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf().mark_active()))?,
+        )?;
+        raw.set(
+            "activate_mark",
+            lua.create_function(|lua, ()| {
+                editor_ref(lua)?.buf_mut().activate_mark();
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "deactivate_mark",
+            lua.create_function(|lua, ()| {
+                editor_ref(lua)?.buf_mut().deactivate_mark();
+                Ok(())
+            })?,
+        )?;
+        raw.set(
             "region",
             lua.create_function(|lua, ()| {
                 Ok(match editor_ref(lua)?.buf().region() {

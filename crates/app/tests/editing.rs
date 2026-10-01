@@ -89,6 +89,56 @@ fn kill_line_and_yank() {
 }
 
 #[test]
+fn region_is_highlighted_after_set_mark() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.txt", "hello world\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("hello world", 5000));
+    em.keys(b"\x00"); // C-SPC: set the mark
+    assert!(em.wait_for("Mark set", 3000));
+    em.keys(b"\x06\x06\x06"); // C-f C-f C-f: point moves 3 chars
+    em.drain();
+    // the region between point and mark gets the light-blue background
+    assert!(
+        em.raw_contains(b"48;5;12m"),
+        "region highlight escape present (48;5;12 = LightBlue bg)"
+    );
+    // C-g quits: the region highlight is cancelled
+    let marker = em.raw.len();
+    em.keys(b"\x07"); // C-g
+    assert!(em.wait_for("Quit", 3000));
+    em.drain();
+    assert!(
+        !em.raw[marker..].windows(7).any(|w| w == b"48;5;12m"),
+        "C-g cancelled the region highlight"
+    );
+    em.quit();
+}
+
+#[test]
+fn set_mark_twice_deactivates() {
+    let em = Em::spawn();
+    let path = write_file(&em.scratch, "t.txt", "hello world\n");
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("hello world", 5000));
+    em.keys(b"\x00\x06\x06"); // C-SPC C-f C-f: mark at 0, point at 2, active
+    em.drain();
+    assert!(em.raw_contains(b"48;5;12m"), "region highlighted");
+    em.keys(b"\x02\x02"); // point back to 0 (== mark)
+    let marker = em.raw.len();
+    em.keys(b"\x00"); // C-SPC with an active mark at point -> deactivates
+    assert!(em.wait_for("Mark deactivated", 3000));
+    em.drain();
+    assert!(
+        !em.raw[marker..].windows(7).any(|w| w == b"48;5;12m"),
+        "second C-SPC at point deactivated the mark"
+    );
+    em.quit();
+}
+
+#[test]
 fn cursor_stays_out_of_the_modeline_at_buffer_end() {
     let em = Em::spawn();
     let content: String = (0..40).map(|i| format!("line {i}\n")).collect();
