@@ -85,23 +85,33 @@ pub fn wrap_ranges(content: RopeSlice<'_>, width: usize) -> Vec<(usize, usize)> 
 /// This is `wrap_ranges(...).len()`, so it always agrees with wrapping.
 pub fn row_count(content: RopeSlice<'_>, width: usize) -> usize {
     let width = width.max(1);
-    let n = content.len_chars();
-    if n == 0 {
+    if content.len_chars() == 0 {
         return 1;
     }
-    // Fast path for contiguous ASCII lines without tabs: one byte per
-    // column, no allocations, so counting millions of lines stays cheap.
+    // Fast path for contiguous ASCII lines: one byte per char, no
+    // allocations, so counting millions of lines stays cheap.
     if let Some(s) = content.as_str() {
-        if s.is_ascii() && !s.as_bytes().contains(&b'\t') {
+        if s.is_ascii() {
             return ascii_row_count(s.as_bytes(), width);
         }
     }
     wrap_ranges(content, width).len()
 }
 
-/// Row count of an ASCII line (no tabs), one byte per column. Replays the
-/// short tail after a space break, so this is O(bytes).
+/// The column advance of an ASCII byte (tabs go to the next tab stop).
+fn ascii_char_width(b: u8, col: usize) -> usize {
+    if b == b'\t' {
+        TAB_WIDTH - col % TAB_WIDTH
+    } else {
+        1
+    }
+}
+
+/// Row count of an ASCII line, mirroring `wrap_ranges` exactly (tabs
+/// expand to tab stops, space breaks replay the short tail). O(bytes),
+/// allocation-free.
 fn ascii_row_count(bytes: &[u8], width: usize) -> usize {
+    let width = width.max(1);
     let mut rows = 1usize;
     let mut col = 0usize;
     let mut row_start = 0usize;
@@ -109,7 +119,9 @@ fn ascii_row_count(bytes: &[u8], width: usize) -> usize {
     let mut i = 0usize;
     while i < bytes.len() {
         let b = bytes[i];
-        if col + 1 > width && i > row_start {
+        // measured before a possible row break, like `wrap_ranges`
+        let w = ascii_char_width(b, col);
+        if col + w > width && i > row_start {
             rows += 1;
             match last_space {
                 Some(ls) if ls > row_start => {
@@ -120,7 +132,7 @@ fn ascii_row_count(bytes: &[u8], width: usize) -> usize {
                         if kb.is_ascii_whitespace() {
                             last_space = Some(k + 1);
                         }
-                        col += 1;
+                        col += ascii_char_width(kb, col);
                     }
                     row_start = ls;
                 }
@@ -134,7 +146,7 @@ fn ascii_row_count(bytes: &[u8], width: usize) -> usize {
         if b.is_ascii_whitespace() {
             last_space = Some(i + 1);
         }
-        col += 1;
+        col += w;
         i += 1;
     }
     rows
@@ -178,13 +190,11 @@ pub fn rows_between(buf: &Buffer, width: usize, from: usize, to: usize) -> usize
             if line_end < line_start {
                 continue; // newline before the starting line
             }
-            rows += if line_end - line_start < width {
-                1 // content shorter than a full row cannot wrap
-            } else if line_start >= chunk_byte {
+            rows += if line_start >= chunk_byte {
                 // the whole line lives in this chunk: count its rows from
                 // the bytes directly (no rope slicing per line)
                 let lb = &bytes[line_start - chunk_byte..rel + 1];
-                if lb.is_ascii() && !lb.contains(&b'\t') {
+                if lb.is_ascii() {
                     ascii_row_count(lb, width)
                 } else {
                     row_count(rope.byte_slice(line_start..line_end + 1), width)
@@ -332,11 +342,9 @@ impl<'a> RowWalker<'a> {
                         if line_end < line_start {
                             continue; // newline before the starting line
                         }
-                        let rows = if line_end - line_start < width {
-                            1
-                        } else if line_start >= chunk_byte {
+                        let rows = if line_start >= chunk_byte {
                             let lb = &chunk.as_bytes()[line_start - chunk_byte..rel + 1];
-                            if lb.is_ascii() && !lb.contains(&b'\t') {
+                            if lb.is_ascii() {
                                 ascii_row_count(lb, width)
                             } else {
                                 row_count(
@@ -511,16 +519,43 @@ mod tests {
     fn ascii_fast_path_agrees_with_general_path() {
         // The byte-level counter is exercised through `row_count` on a
         // contiguous ASCII rope; compare against the char-based ranges.
+        // Tab-heavy lines are included: tabs expand to tab stops, so a
+        // short line can wrap (this used to desync the scroll from the
+        // renderer on tab-indented generated files).
         let mut text = String::new();
         for i in 0..500 {
             text.push_str(&format!("some words and text {i} wrap me please now\n"));
+            text.push_str(&format!("\t\t\tshort{i}\tvalue\n"));
+            text.push_str(&format!("indent\t\t\t{}\\t\t\\tdeep\n", i));
         }
         let rope = rope(&text);
         for width in [5usize, 17, 39, 80] {
-            for line in rope.lines().take(100) {
+            for line in rope.lines() {
                 assert_eq!(row_count(line, width), wrap_ranges(line, width).len());
             }
         }
+    }
+
+    #[test]
+    fn short_tab_lines_wrap() {
+        // 11 tabs expand to 88 columns: a line that is short in bytes can
+        // still wrap, and every counter must agree with the renderer.
+        let mut b = Buffer::new("test");
+        b.insert(&format!("{}\n", "\t".repeat(11)));
+        assert_eq!(wrap_ranges(b.line(0), 80).len(), 2);
+        assert_eq!(row_count(b.line(0), 80), 2);
+        assert_eq!(rows_between(&b, 80, 0, b.rope().len_lines()), 2);
+        let mut w = RowWalker::new(&b, 80, 0);
+        let (l0, s0, _, _) = w.next_row().unwrap();
+        let (l1, s1, _, _) = w.next_row().unwrap();
+        assert_eq!((l0, s0), (0, 0), "first row of the tab line");
+        assert_eq!((l1, s1), (0, 1), "second row of the tab line");
+        // 9 tabs end at column 72; the newline still fits: one row
+        let mut c = Buffer::new("test");
+        c.insert(&format!("{}\n", "\t".repeat(9)));
+        assert_eq!(wrap_ranges(c.line(0), 80).len(), 1);
+        assert_eq!(row_count(c.line(0), 80), 1);
+        assert_eq!(rows_between(&c, 80, 0, c.rope().len_lines()), 1);
     }
 
     #[test]
