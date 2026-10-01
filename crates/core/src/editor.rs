@@ -369,42 +369,6 @@ impl Editor {
         w.view.recenter(buf, rows);
     }
 
-    /// Re-parse the selected window's buffer for highlighting if it has a
-    /// language mode and is marked dirty (or has no tree yet). Files above
-    /// the parse caps are left alone, and re-parses are throttled, to keep
-    /// large-file editing snappy.
-    pub fn refresh_syntax_current(&mut self) {
-        const COOLDOWN: std::time::Duration = std::time::Duration::from_millis(200);
-        let idx = self.selected_buffer_index();
-        let buf = &mut self.buffers[idx];
-        let Some(lang) = buf.mode().lang else {
-            return;
-        };
-        let len = buf.rope().len_chars();
-        if len > crate::syntax::MAX_PARSE_CHARS {
-            return;
-        }
-        if buf.syntax().is_some() && len > crate::syntax::MAX_REPARSE_CHARS {
-            return; // keep the initial parse
-        }
-        if !buf.syntax_dirty() && buf.syntax().is_some() {
-            return;
-        }
-        if buf.syntax().is_some()
-            && buf
-                .syntax_last_parse()
-                .is_some_and(|t| t.elapsed() < COOLDOWN)
-        {
-            return; // dirty but throttled; re-parsed on a later key
-        }
-        let text = buf.rope().to_string();
-        if let Some(s) = crate::syntax::parse(lang, &text) {
-            buf.set_syntax(Some(s));
-            buf.set_syntax_dirty(false);
-            buf.set_syntax_last_parse(std::time::Instant::now());
-        }
-    }
-
     // --- search ------------------------------------------------------------
 
     /// Case-insensitive match of `query` at or after `from`, in char
@@ -668,16 +632,6 @@ impl Editor {
         self.pending.as_ref()
     }
 
-    /// True if point (in the current buffer) is inside a comment or string
-    /// node (used by electric-newline-and-maybe-indent in Lua).
-    pub fn point_in_comment_or_string(&self) -> bool {
-        let buf = self.buf();
-        let Some(s) = buf.syntax() else {
-            return false;
-        };
-        crate::syntax::point_in_comment_or_string(s, buf.rope(), buf.point())
-    }
-
     /// Record the key that was delivered to a `read-key` request, so a
     /// command can ask to replay it after finishing.
     pub fn set_read_key(&mut self, key: Key) {
@@ -826,6 +780,25 @@ impl Editor {
         res
     }
 
+    /// Notify the scripting host that the files of the given buffers
+    /// changed on disk (inotify events); the Lua side applies the
+    /// auto-revert policy.
+    pub fn notify_file_changes(&mut self, ids: &[usize]) -> Result<()> {
+        let mut res = Ok(());
+        self.with_host(|ed, host| {
+            res = host.notify_file_changes(ids, ed);
+        });
+        res
+    }
+
+    /// Re-read the file of the buffer with `id` from disk.
+    pub fn reload_buffer_from_disk(&mut self, id: usize) -> Result<()> {
+        let idx = self.buffer_index(id);
+        self.buffers[idx]
+            .reload_from_disk()
+            .map_err(|e| anyhow!("{e}"))
+    }
+
     // --- major / minor modes ----------------------------------------------
 
     pub fn register_mode_def(&mut self, def: ModeDef) {
@@ -833,8 +806,8 @@ impl Editor {
     }
 
     /// Set the major mode of the selected buffer from a registered
-    /// definition, installing its local keymap and re-parsing if the
-    /// language changed.
+    /// Set the major mode of the selected buffer from a registered
+    /// definition, installing its local keymap.
     pub fn set_buffer_mode_by_name(&mut self, idx: usize, name: &str) -> Result<()> {
         let def = self
             .mode_defs
@@ -845,14 +818,6 @@ impl Editor {
         buf.set_mode(def.to_mode());
         let local = def.keymap.filter(|k| !k.is_empty());
         buf.set_local_keymap(local);
-        let lang = def.lang;
-        if lang.is_some() {
-            buf.set_syntax(None);
-            buf.set_syntax_dirty(true);
-        } else {
-            buf.set_syntax(None);
-            buf.set_syntax_dirty(false);
-        }
         Ok(())
     }
 

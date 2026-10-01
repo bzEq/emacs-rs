@@ -62,6 +62,7 @@ function M.open_file(path)
     return
   end
   raw.set_buffer_mode(M.mode_for_path(path))
+  M.record_file_stat(raw.selected_buffer_id())
 end
 
 function M.save_buffer_at_id(id)
@@ -78,6 +79,7 @@ function M.save_buffer_at_id(id)
     return false
   end
   raw.set_buffer_modified(id, false)
+  M.record_file_stat(id)
   M.run_hook("after_save")
   emacs.message("Wrote " .. (raw.buffer_info(id).path or ""))
   return true
@@ -123,6 +125,27 @@ end, "Open a file.")
 M.define("save-buffer", function()
   M.save_buffer_at_id(raw.id())
 end, "Save the current buffer to its file.")
+
+M.define("revert-buffer", function()
+  local id = raw.selected_buffer_id()
+  local info = raw.buffer_info(id)
+  if not info.path then
+    emacs.error("Buffer has no file to revert")
+    return
+  end
+  if info.modified then
+    local yes = emacs.read_yes_no(
+        "Buffer " .. info.name .. " modified; revert anyway? (y/n)")
+    if yes ~= true then return end
+  end
+  local ok, err = pcall(raw.reload_buffer_from_disk, id)
+  if not ok then
+    emacs.error(tostring(err))
+    return
+  end
+  M.record_file_stat(id)
+  emacs.message("Reverted " .. info.name)
+end, "Revert the current buffer from its file on disk.")
 
 M.define("write-file", function()
   local id = raw.id()

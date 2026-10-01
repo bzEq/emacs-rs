@@ -13,7 +13,7 @@ window tree / scrolling           undo & kill ring
 key parsing / keymap lookup       prefix arguments (C-u, C-3, M--)
 rendering (ratatui)               isearch (C-s / C-r)
 terminal event loop               dired
-tree-sitter highlighting          major / minor modes & keybindings
+file watching (inotify)           major / minor modes & keybindings
 minibuffer input editing          completion functions
 filesystem & buffer primitives    find-file, save, buffers, quit
                                   M-x, describe-key/bindings
@@ -62,6 +62,11 @@ directory, so users can redefine any part of the editor from their
     prefix arguments (`C-u`/`C-3`) — all implemented in Lua
   - Active region: after `C-SPC` the text between point and mark is
     highlighted (transient-mark-mode), and `C-w`/`M-w` act on it
+  - global-auto-revert-mode: buffer files are watched with inotify
+    (via the `notify` crate); when another program changes a file, the
+    buffer reverts — or warns instead if it has unsaved edits. Manual
+    `M-x revert-buffer` included; toggle with `M-x
+    global-auto-revert-mode`
   - CRLF files follow Emacs semantics (`\r\n` acts as a single newline)
 - **Window system**: `C-x 2/3` splits, `C-x 0/1` deletes, `C-x o` cycles;
   each window keeps its own point and scroll position
@@ -69,13 +74,9 @@ directory, so users can redefine any part of the editor from their
   (D), rename (R), copy (C), mkdir (+), subdirectory navigation;
   `find-file` or a directory command-line argument opens dired
   automatically
-- **Syntax highlighting**: tree-sitter (Rust, Lua, C++ built in), colored
-  by node type, with parse size caps and a re-parse cooldown so large
-  files stay fast
 - **Auto-indentation**: `RET` indents smartly (`{` indents, `}`/`end`
-  outdents), `TAB` re-indents the current line, `C-j` runs
-  `electric-newline-and-maybe-indent` (no indent inside comments/strings),
-  Backspace at line start deletes one indent unit — all in Lua
+  outdents), `TAB` re-indents the current line, Backspace at line start
+  deletes one indent unit — all in Lua
 - **Major / minor modes**: major mode chosen by file extension; minor
   modes like `line-numbers` toggle per buffer; modes can carry local
   keymaps (lighters shown in the modeline)
@@ -145,7 +146,6 @@ local key  = emacs.read_key()            -- "C-x", "RET", "a", ...
 -- major / minor modes
 emacs.define_major_mode("txt-mode", {
   indent = 2,
-  language = "lua",                      -- optional: enables highlighting
   keymap = { ["C-c h"] = "my-cmd" },
 })
 emacs.define_minor_mode("my-extra", {
@@ -188,14 +188,14 @@ cargo test
 
 - `crates/core` unit tests: rope buffer semantics (goal column, CRLF),
   key parsing, keymaps, window tree, minibuffer editing, search
-  primitives, syntax highlighting
+  primitives
 - `crates/lua/tests` unit tests drive the real Lua runtime against an
   in-memory editor: commands, undo, kill ring, prefix arguments, isearch
   (via coroutine resumes), indentation, dired, and the read-string /
   read-key / yes-no protocols
 - `crates/app/tests` PTY integration tests: spawn the real `em` binary in
   a pseudo-terminal, send keystrokes, reconstruct the screen, and assert
-  (editing, windows, search, highlighting, modes, completion, dired, CLI)
+  (editing, windows, search, modes, completion, dired, CLI)
 
 CI (GitHub Actions) runs formatting, clippy, and the full test suite on
 every push to `main` and every pull request.

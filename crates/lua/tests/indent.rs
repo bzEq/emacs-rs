@@ -67,36 +67,9 @@ fn lua_end_outdents() {
 #[test]
 fn electric_newline_indents_normally() {
     let mut le = rust_ed("fn main() {");
-    le.ed.refresh_syntax_current();
     le.ed.buf_mut().move_to_buffer_end();
     le.run("electric-newline-and-maybe-indent");
     assert_eq!(le.text(), "fn main() {\n    ");
-}
-
-#[test]
-fn electric_newline_skips_indent_inside_string() {
-    let mut le = rust_ed("fn main() {\n    let s = \"text\";\n}");
-    le.ed.refresh_syntax_current();
-    // point inside the string literal ("te|xt"): insert a newline there
-    let line1 = le.ed.buf().rope().line_to_char(1);
-    le.ed.buf_mut().set_point(line1 + 15); // 'x' of "text"
-    le.run("electric-newline-and-maybe-indent");
-    // the new line starts right at "xt\";" with no indentation
-    assert!(le.text().contains("\nxt"));
-    assert!(!le.text().contains("\n    xt"));
-}
-
-#[test]
-fn electric_newline_skips_indent_inside_comment() {
-    let mut le = rust_ed("fn main() {\n    // note\n}");
-    le.ed.refresh_syntax_current();
-    // point inside the comment text ("// no|te")
-    let line1 = le.ed.buf().rope().line_to_char(1);
-    le.ed.buf_mut().set_point(line1 + 9); // 't' of "note"
-    le.run("electric-newline-and-maybe-indent");
-    // the new line starts with "te\n}" content and no indent
-    assert!(le.text().contains("\nte"));
-    assert!(!le.text().contains("\n    te"));
 }
 
 #[test]

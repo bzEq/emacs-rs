@@ -264,11 +264,7 @@ end)
 
 function emacs.define_major_mode(name, opts)
   opts = opts or {}
-  local lang = opts.language
-  if lang ~= "rust" and lang ~= "lua" and lang ~= "cpp" then
-    lang = nil
-  end
-  raw.register_mode_def(name, lang, opts.keymap)
+  raw.register_mode_def(name, opts.keymap)
   M.mode_indent[name] = opts.indent
   M.define(name, function()
     raw.set_buffer_mode(name)
@@ -373,7 +369,54 @@ function M.startup(path)
   end
 end
 
+-- ---- auto-revert (global-auto-revert-mode) ---------------------------------
+--
+-- Rust watches buffer files with inotify and calls _internals.file_changed
+-- with the affected buffer ids; the policy lives here: revert unmodified
+-- buffers, warn for modified ones.
+
+M.file_stats = {}          -- buffer id -> { mtime = millis, size = bytes }
+M.auto_revert_enabled = true
+
+function M.record_file_stat(id)
+  local info = raw.buffer_info(id)
+  if info.path then
+    local mt, sz = raw.file_stat(info.path)
+    M.file_stats[id] = { mtime = mt, size = sz }
+  end
+end
+
+function M.file_changed(ids)
+  if not M.auto_revert_enabled then return end
+  for _, id in ipairs(ids) do
+    local info = raw.buffer_info(id)
+    if info.path and not info.read_only then
+      local mt, sz = raw.file_stat(info.path)
+      if mt then
+        local prev = M.file_stats[id]
+        local changed = prev and prev.mtime
+            and (prev.mtime ~= mt or prev.size ~= sz)
+        if changed then
+          if info.modified then
+            emacs.message(info.name .. " changed on disk")
+          else
+            local ok, err = pcall(raw.reload_buffer_from_disk, id)
+            if ok then
+              emacs.message("Reverted " .. info.name)
+              M.run_hook("after_revert")
+            else
+              emacs.error(tostring(err))
+            end
+          end
+        end
+        M.file_stats[id] = { mtime = mt, size = sz }
+      end
+    end
+  end
+end
+
 _internals = {
   run_command = M.run_command,
   startup = M.startup,
+  file_changed = M.file_changed,
 }

@@ -21,6 +21,7 @@ use emacs_core::keymap::Lookup;
 use emacs_core::script::{CommandOutcome, PendingRequest, ResumeValue};
 use emacs_lua::LuaHost;
 use emacs_ui::render;
+use notify::Watcher;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -156,6 +157,14 @@ fn init_file() -> Option<PathBuf> {
 }
 
 fn run(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    // Watch buffer files with inotify (global-auto-revert-mode): events
+    // arrive on `fw`'s channel and are drained each loop iteration.
+    let mut fw = FileWatcher::new();
+    fw.sync(ed);
+    // How long the loop blocks for input: also bounds the latency of
+    // inotify event delivery. Small enough to feel instant, large enough
+    // to idle cheaply.
+    const DRAIN: std::time::Duration = std::time::Duration::from_millis(250);
     loop {
         ed.scroll_current_view();
         terminal.draw(|f| {
@@ -166,20 +175,104 @@ fn run(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
         if ed.quit() {
             return Ok(());
         }
-        match event::read()? {
-            Event::Key(k) if k.kind == KeyEventKind::Press => {
-                if let Some(key) = to_key(&k) {
-                    if let Err(e) = handle_key(ed, key) {
-                        ed.error(e.to_string());
+        if event::poll(DRAIN)? {
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    if let Some(key) = to_key(&k) {
+                        if let Err(e) = handle_key(ed, key) {
+                            ed.error(e.to_string());
+                        }
+                        fw.sync(ed);
                     }
-                    ed.refresh_syntax_current();
+                }
+                Event::Resize(w, h) => {
+                    ed.set_window_size(h.saturating_sub(2) as usize, w as usize);
+                }
+                _ => {}
+            }
+        }
+        let changed = fw.drain();
+        if !changed.is_empty() {
+            if let Err(e) = ed.notify_file_changes(&changed) {
+                ed.error(e.to_string());
+            }
+        }
+    }
+}
+
+/// inotify-based file watching for auto-revert: watches the parent
+/// directory of every open buffer file (editors often replace files via
+/// rename, which breaks watches on the file itself) and reports events for
+/// watched files to the event loop. The revert policy lives in Lua.
+struct FileWatcher {
+    watcher: Option<notify::RecommendedWatcher>,
+    rx: std::sync::mpsc::Receiver<Result<notify::Event, notify::Error>>,
+    watched_dirs: std::collections::HashSet<PathBuf>,
+    /// canonical file path -> buffer ids showing it
+    files: std::collections::HashMap<PathBuf, Vec<usize>>,
+}
+
+impl FileWatcher {
+    fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = notify::recommended_watcher(tx).ok();
+        if watcher.is_none() {
+            eprintln!("em: warning: file watching unavailable; auto-revert disabled");
+        }
+        FileWatcher {
+            watcher,
+            rx,
+            watched_dirs: std::collections::HashSet::new(),
+            files: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Match the watch set to the editor's buffers: watch the parent
+    /// directory of every buffer with a file, stop watching stale ones.
+    fn sync(&mut self, ed: &Editor) {
+        let mut files: std::collections::HashMap<PathBuf, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for buf in ed.buffers() {
+            let Some(path) = buf.path() else { continue };
+            let Ok(canon) = std::fs::canonicalize(path) else {
+                continue;
+            };
+            files.entry(canon.clone()).or_default().push(buf.id);
+            if let Some(dir) = canon.parent() {
+                dirs.insert(dir.to_path_buf());
+            }
+        }
+        let Some(watcher) = self.watcher.as_mut() else {
+            return;
+        };
+        for dir in dirs.difference(&self.watched_dirs) {
+            let _ = watcher.watch(dir, notify::RecursiveMode::NonRecursive);
+        }
+        for dir in self.watched_dirs.difference(&dirs) {
+            let _ = watcher.unwatch(dir);
+        }
+        self.watched_dirs = dirs;
+        self.files = files;
+    }
+
+    /// Drain pending inotify events; return the ids of buffers whose files
+    /// changed, deduplicated.
+    fn drain(&self) -> Vec<usize> {
+        let mut changed: Vec<usize> = Vec::new();
+        while let Ok(event) = self.rx.try_recv() {
+            let Ok(event) = event else { continue };
+            for path in &event.paths {
+                if let Some(ids) = self.files.get(path) {
+                    for &id in ids {
+                        if !changed.contains(&id) {
+                            changed.push(id);
+                        }
+                    }
                 }
             }
-            Event::Resize(w, h) => {
-                ed.set_window_size(h.saturating_sub(2) as usize, w as usize);
-            }
-            _ => {}
         }
+        changed
     }
 }
 

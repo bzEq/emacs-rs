@@ -109,12 +109,11 @@ end, "Insert a newline and indent the new line.")
 
 M.define("electric-newline-and-maybe-indent", function()
   local unit = M.current_indent_unit()
-  local in_str = raw.in_comment_or_string()
   emacs.insert("\n")
-  if unit and not in_str then
+  if unit then
     emacs.insert(string.rep(" ", M.compute_indent(raw.line_of_point(), unit)))
   end
-end, "Insert a newline and indent the new line, unless point is in a comment or string.")
+end, "Insert a newline and indent the new line.")
 
 M.define("indent-for-tab-command", function()
   local unit = M.current_indent_unit()

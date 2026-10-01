@@ -9,7 +9,6 @@ use ropey::Rope;
 
 use crate::keymap::Keymap;
 use crate::mode::{fundamental, Mode};
-use crate::syntax::Syntax;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -54,16 +53,10 @@ pub struct Buffer {
     local_keymap: Option<Keymap>,
     /// Names of enabled minor modes, in enable order (last = most recent).
     enabled_minor: Vec<String>,
-    /// Parsed syntax tree for highlighting, if the mode has a language.
-    syntax: Option<Syntax>,
-    /// Set by edits while a language mode is active; triggers re-parse.
-    syntax_dirty: bool,
-    /// Last re-parse time, for edit throttling.
-    syntax_last_parse: Option<std::time::Instant>,
 }
 
-/// A cloned buffer shares its text but starts with no syntax tree (used
-/// to save/restore the minibuffer state across a nested command).
+/// A cloned buffer shares its text (used to save/restore the minibuffer
+/// state across a nested command).
 impl Clone for Buffer {
     fn clone(&self) -> Self {
         Buffer {
@@ -80,9 +73,6 @@ impl Clone for Buffer {
             mode: self.mode.clone(),
             local_keymap: self.local_keymap.clone(),
             enabled_minor: self.enabled_minor.clone(),
-            syntax: None,
-            syntax_dirty: self.syntax_dirty,
-            syntax_last_parse: None,
         }
     }
 }
@@ -103,9 +93,6 @@ impl Buffer {
             mode: fundamental(),
             local_keymap: None,
             enabled_minor: Vec::new(),
-            syntax: None,
-            syntax_dirty: false,
-            syntax_last_parse: None,
         }
     }
 
@@ -128,9 +115,6 @@ impl Buffer {
             mode: fundamental(),
             local_keymap: None,
             enabled_minor: Vec::new(),
-            syntax: None,
-            syntax_dirty: false,
-            syntax_last_parse: None,
         })
     }
 
@@ -154,6 +138,23 @@ impl Buffer {
         for chunk in self.rope.chunks() {
             file.write_all(chunk.as_bytes())?;
         }
+        Ok(())
+    }
+
+    /// Re-read the buffer's file from disk (auto-revert / revert-buffer):
+    /// replace the text, clamp point and mark, clear the modified flag,
+    pub fn reload_from_disk(&mut self) -> std::io::Result<()> {
+        let path = self.path.clone().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "buffer has no file name")
+        })?;
+        let file = File::open(&path)?;
+        let rope = Rope::from_reader(BufReader::new(file))?;
+        self.rope = rope;
+        self.point = self.point.min(self.rope.len_chars());
+        if let Some(m) = self.mark.as_mut() {
+            *m = (*m).min(self.rope.len_chars());
+        }
+        self.modified = false;
         Ok(())
     }
 
@@ -284,30 +285,6 @@ impl Buffer {
 
     pub fn disable_minor_mode(&mut self, name: &str) {
         self.enabled_minor.retain(|m| m != name);
-    }
-
-    pub fn syntax(&self) -> Option<&Syntax> {
-        self.syntax.as_ref()
-    }
-
-    pub fn set_syntax(&mut self, syntax: Option<Syntax>) {
-        self.syntax = syntax;
-    }
-
-    pub fn syntax_dirty(&self) -> bool {
-        self.syntax_dirty
-    }
-
-    pub fn set_syntax_dirty(&mut self, dirty: bool) {
-        self.syntax_dirty = dirty;
-    }
-
-    pub fn syntax_last_parse(&self) -> Option<std::time::Instant> {
-        self.syntax_last_parse
-    }
-
-    pub fn set_syntax_last_parse(&mut self, t: std::time::Instant) {
-        self.syntax_last_parse = Some(t);
     }
 
     /// 0-based line index containing `point`.
@@ -474,7 +451,6 @@ impl Buffer {
         self.point += len;
         self.goal_column = None;
         self.modified = true;
-        self.syntax_dirty |= self.mode.lang.is_some();
     }
 
     /// Insert `text` at `pos` (not necessarily point); point is unchanged.
@@ -494,7 +470,6 @@ impl Buffer {
             self.point += len;
         }
         self.modified = true;
-        self.syntax_dirty |= self.mode.lang.is_some();
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -521,7 +496,6 @@ impl Buffer {
         }
         self.goal_column = None;
         self.modified = true;
-        self.syntax_dirty |= self.mode.lang.is_some();
         text
     }
 

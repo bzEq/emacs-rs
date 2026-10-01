@@ -188,15 +188,11 @@ fn exchange_point_and_mark() {
 }
 
 #[test]
-fn mode_switch_installs_keymap_and_reparses() {
+fn mode_switch_installs_keymap() {
     let mut le = editor_with("fn main() {}");
     le.run("rust-mode");
     assert_eq!(le.ed.buf().mode().name, "rust-mode");
-    assert!(le.ed.buf().syntax_dirty());
-    le.ed.refresh_syntax_current();
-    assert!(le.ed.buf().syntax().is_some());
     le.run("fundamental-mode");
-    assert!(le.ed.buf().syntax().is_none());
     assert_eq!(le.ed.buf().mode().name, "fundamental-mode");
 }
 

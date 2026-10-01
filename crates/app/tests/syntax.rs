@@ -1,52 +1,8 @@
-//! PTY regression tests: syntax highlighting, auto-indentation, major modes.
+//! PTY regression tests: auto-indentation and major modes.
 
 mod common;
 
 use common::{write_file, Em};
-
-#[test]
-fn rust_keywords_are_colored() {
-    let em = Em::spawn();
-    let path = write_file(
-        &em.scratch,
-        "t.rs",
-        "fn main() {\n    let x = 42; // comment\n    let s = \"str\";\n}\n",
-    );
-    let path_s = path.to_string_lossy().into_owned();
-    let mut em = Em::spawn_with_args(&[&path_s]);
-    assert!(em.wait_for("fn main()", 5000));
-    assert!(em.wait_for("(rust-mode)", 5000), "modeline shows rust-mode");
-    // the initial parse runs after the first key is processed
-    em.keys(b"\x02"); // C-b
-    assert!(em.wait_for("fn main()", 3000));
-    em.drain();
-    // magenta (keyword), green (string), yellow (number), dark gray (comment)
-    assert!(
-        em.raw_contains(b"\x1b[38;5;5;49m"),
-        "keywords styled magenta"
-    );
-    assert!(em.raw_contains(b"\x1b[38;5;2;49m"), "strings styled green");
-    assert!(em.raw_contains(b"\x1b[38;5;3;49m"), "numbers styled yellow");
-    assert!(
-        em.raw_contains(b"\x1b[38;5;8;49m"),
-        "comments styled dark gray"
-    );
-    em.quit();
-}
-
-#[test]
-fn lua_keywords_are_colored() {
-    let em = Em::spawn();
-    let path = write_file(&em.scratch, "t.lua", "local function f() return 42 end\n");
-    let path_s = path.to_string_lossy().into_owned();
-    let mut em = Em::spawn_with_args(&[&path_s]);
-    assert!(em.wait_for("local function", 5000));
-    em.keys(b"\x02"); // trigger the initial parse
-    assert!(em.wait_for("local function", 3000));
-    em.drain();
-    assert!(em.raw_contains(b"\x1b[38;5;5;49m"), "lua keywords styled");
-    em.quit();
-}
 
 #[test]
 fn ret_auto_indents_after_brace() {
@@ -100,28 +56,7 @@ fn cj_indents_normally() {
 }
 
 #[test]
-fn cj_skips_indent_inside_string() {
-    let em = Em::spawn();
-    let path = write_file(&em.scratch, "t.rs", "fn main() {\n    let s = \"text\";\n}");
-    let path_s = path.to_string_lossy().into_owned();
-    let mut em = Em::spawn_with_args(&[&path_s]);
-    assert!(em.wait_for("text", 5000));
-    // C-n to the string line, C-e to EOL, back into the string
-    em.keys(b"\x0e\x05");
-    for _ in 0..3 {
-        em.keys(b"\x02"); // C-b
-    }
-    assert!(em.wait_for("L2 C16", 3000), "point inside the string");
-    em.keys(b"\x0a"); // C-j
-    assert!(
-        em.wait_for("L3 C0", 3000),
-        "C-j inside a string does not indent"
-    );
-    em.quit();
-}
-
-#[test]
-fn inc_file_opens_in_cpp_mode_with_highlighting() {
+fn inc_file_opens_in_cpp_mode() {
     let em = Em::spawn();
     let path = write_file(
         &em.scratch,
@@ -132,16 +67,5 @@ fn inc_file_opens_in_cpp_mode_with_highlighting() {
     let mut em = Em::spawn_with_args(&[&path_s]);
     assert!(em.wait_for("Widget", 5000));
     assert!(em.wait_for("(cpp-mode)", 5000), "modeline shows cpp-mode");
-    em.keys(b"\x02"); // trigger the initial parse
-    assert!(em.wait_for("Widget", 3000));
-    em.drain();
-    assert!(
-        em.raw_contains(b"\x1b[38;5;5;49m"),
-        "c++ keywords styled magenta"
-    );
-    assert!(
-        em.raw_contains(b"\x1b[38;5;4;49m"),
-        "function name styled blue"
-    );
     em.quit();
 }

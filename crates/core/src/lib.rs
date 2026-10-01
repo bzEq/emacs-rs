@@ -7,6 +7,5 @@ pub mod minor;
 pub mod mode;
 pub mod script;
 pub mod search;
-pub mod syntax;
 pub mod view;
 pub mod window;

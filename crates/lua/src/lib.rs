@@ -29,7 +29,6 @@ use mlua::{Function, Lua, Table, Thread, Value};
 use emacs_core::editor::Editor;
 use emacs_core::key::Key;
 use emacs_core::keymap::{Keymap, Lookup};
-use emacs_core::mode::Lang;
 use emacs_core::script::{CommandOutcome, PendingRequest, ResumeValue, ScriptHost};
 
 /// The Lua runtime modules, loaded in this exact order. Every module is
@@ -142,6 +141,12 @@ fn run_command_fn(lua: &Lua) -> mlua::Result<Function> {
 /// The `_internals.startup(path)` entry point installed by the Lua runtime.
 fn startup_fn(lua: &Lua) -> mlua::Result<Function> {
     internals_table(lua)?.get("startup")
+}
+
+/// The `_internals.file_changed(ids)` entry point installed by the Lua
+/// runtime (auto-revert policy).
+fn file_changed_fn(lua: &Lua) -> mlua::Result<Function> {
+    internals_table(lua)?.get("file_changed")
 }
 
 /// Decode the result of resuming a command coroutine: either the command
@@ -540,10 +545,6 @@ impl LuaHost {
                 Ok(ed.buffers()[ed.selected_buffer_index()].mode().name.clone())
             })?,
         )?;
-        raw.set(
-            "in_comment_or_string",
-            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.point_in_comment_or_string()))?,
-        )?;
 
         // -- buffer management ----------------------------------------------
         raw.set(
@@ -816,23 +817,14 @@ impl LuaHost {
         // -- modes ----------------------------------------------------------
         raw.set(
             "register_mode_def",
-            lua.create_function(
-                |lua, (name, lang, keymap): (String, Option<String>, Option<Table>)| {
-                    let lang = match lang.as_deref() {
-                        Some("rust") => Some(Lang::Rust),
-                        Some("lua") => Some(Lang::Lua),
-                        Some("cpp") => Some(Lang::Cpp),
-                        _ => None,
-                    };
-                    let def = emacs_core::mode::ModeDef {
-                        name: name.clone(),
-                        lang,
-                        keymap: parse_keymap_table(lua, keymap)?,
-                    };
-                    editor_ref(lua)?.register_mode_def(def);
-                    Ok(())
-                },
-            )?,
+            lua.create_function(|lua, (name, keymap): (String, Option<Table>)| {
+                let def = emacs_core::mode::ModeDef {
+                    name: name.clone(),
+                    keymap: parse_keymap_table(lua, keymap)?,
+                };
+                editor_ref(lua)?.register_mode_def(def);
+                Ok(())
+            })?,
         )?;
         raw.set(
             "register_minor_def",
@@ -930,6 +922,28 @@ impl LuaHost {
             lua.create_function(|lua, ()| {
                 editor_ref(lua)?.set_replay();
                 Ok(())
+            })?,
+        )?;
+        raw.set(
+            "file_stat",
+            lua.create_function(|_lua, path: String| match std::fs::metadata(&path) {
+                Ok(md) => {
+                    let mtime = md.modified().ok().map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64
+                    });
+                    Ok((mtime, Some(md.len())))
+                }
+                Err(_) => Ok((None, None)),
+            })?,
+        )?;
+        raw.set(
+            "reload_buffer_from_disk",
+            lua.create_function(|lua, id: usize| {
+                editor_ref(lua)?
+                    .reload_buffer_from_disk(id)
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
         )?;
         raw.set(
@@ -1077,6 +1091,7 @@ impl ScriptHost for LuaHost {
             internals_table(lua)?;
             run_command_fn(lua)?;
             startup_fn(lua)?;
+            file_changed_fn(lua)?;
             Ok(())
         })
     }
@@ -1096,6 +1111,7 @@ impl ScriptHost for LuaHost {
             internals_table(lua)?;
             run_command_fn(lua)?;
             startup_fn(lua)?;
+            file_changed_fn(lua)?;
             Ok(())
         })
     }
@@ -1132,6 +1148,15 @@ impl ScriptHost for LuaHost {
                 Some(p) => f.call::<()>(p)?,
                 None => f.call::<()>(Option::<String>::None)?,
             }
+            Ok(())
+        })
+    }
+
+    fn notify_file_changes(&mut self, ids: &[usize], editor: &mut Editor) -> Result<()> {
+        let ids = ids.to_vec();
+        with_editor(&self.lua, editor, |lua| {
+            let f = file_changed_fn(lua)?;
+            f.call::<()>(ids)?;
             Ok(())
         })
     }

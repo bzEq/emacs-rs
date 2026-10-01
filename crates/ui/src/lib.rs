@@ -1,7 +1,6 @@
 //! Terminal rendering: window tree, modeline, echo area / minibuffer, cursor.
 
 use emacs_core::editor::Editor;
-use emacs_core::syntax::{line_segments, Group};
 use emacs_core::view::View;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -91,19 +90,6 @@ fn render_window(frame: &mut Frame, buf: &emacs_core::buffer::Buffer, view: &Vie
     frame.render_widget(Paragraph::new(lines), text_rect);
 }
 
-fn style_for(group: Group) -> Style {
-    let color = match group {
-        Group::Keyword => Color::Magenta,
-        Group::String => Color::Green,
-        Group::Comment => Color::DarkGray,
-        Group::Number => Color::Yellow,
-        Group::Type => Color::Cyan,
-        Group::Function => Color::Blue,
-        Group::Constant => Color::Yellow,
-    };
-    Style::default().fg(color)
-}
-
 /// Slice by char columns.
 fn slice_cols(s: &str, a: usize, b: usize) -> &str {
     let count = s.chars().count();
@@ -117,10 +103,9 @@ fn slice_cols(s: &str, a: usize, b: usize) -> &str {
     &s[start..end]
 }
 
-/// One line with syntax highlighting. Lines containing tabs are rendered
-/// plain (tab expansion would shift highlight columns). When the mark is
-/// set, the columns between point and mark get the active-region
-/// background (Emacs transient-mark-mode).
+/// One line, rendered plain (tab-expanded). When the mark is set, the
+/// columns between point and mark get the active-region background
+/// (Emacs transient-mark-mode).
 fn render_line(
     buf: &emacs_core::buffer::Buffer,
     line_idx: usize,
@@ -131,84 +116,37 @@ fn render_line(
         return TuiLine::from("");
     }
     let plain = expand_tabs(content);
-    let has_tab = content.chars().any(|c| c == '\t');
-    let segs = buf
-        .syntax()
-        .map(|s| line_segments(s, buf, line_idx))
-        .unwrap_or_default();
-    if has_tab {
+    if content.chars().any(|c| c == '\t') {
         // tab expansion shifts highlight columns; render plain
         return TuiLine::from(plain);
     }
     let total = plain.chars().count();
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut last = 0usize;
-    for s in segs {
-        let s_start = s.start.min(total);
-        let s_end = s.end.min(total);
-        if s_end <= s_start {
-            continue;
-        }
-        if s_start > last {
-            spans.push(Span::raw(slice_cols(&plain, last, s_start).to_string()));
-        }
-        spans.push(Span::styled(
-            slice_cols(&plain, s_start, s_end).to_string(),
-            style_for(s.group),
-        ));
-        last = s_end;
-    }
-    if last < total {
-        spans.push(Span::raw(slice_cols(&plain, last, total).to_string()));
-    }
     if let Some((rs, re)) = region {
         let line_start = buf.rope().line_to_char(line_idx);
         let line_end = line_start + buf.line_len_chars(line_idx);
         let r_start = rs.max(line_start).saturating_sub(line_start);
         let r_end = re.min(line_end).saturating_sub(line_start);
         if r_end > r_start {
-            spans = overlay_region(spans, r_start, r_end);
-        }
-    }
-    TuiLine::from(spans)
-}
-
-/// Split `spans` at the region's column range and give the columns inside
-/// the range the active-region background.
-fn overlay_region(
-    spans: Vec<Span<'static>>,
-    region_start: usize,
-    region_end: usize,
-) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::new();
-    let mut col = 0usize;
-    for span in spans {
-        let len = span.content.chars().count();
-        let (s, e) = (col, col + len);
-        let rs = region_start.max(s);
-        let re = region_end.min(e);
-        if re > rs {
-            let before = slice_cols(&span.content, 0, rs - s);
-            let inside = slice_cols(&span.content, rs - s, re - s);
-            let after = slice_cols(&span.content, re - s, len);
+            let before = slice_cols(&plain, 0, r_start);
+            let inside = slice_cols(&plain, r_start, r_end);
+            let after = slice_cols(&plain, r_end, total);
             if !before.is_empty() {
-                out.push(Span::styled(before.to_string(), span.style));
+                spans.push(Span::raw(before.to_string()));
             }
             if !inside.is_empty() {
-                out.push(Span::styled(
+                spans.push(Span::styled(
                     inside.to_string(),
-                    span.style.bg(Color::LightBlue),
+                    Style::default().bg(Color::LightBlue),
                 ));
             }
             if !after.is_empty() {
-                out.push(Span::styled(after.to_string(), span.style));
+                spans.push(Span::raw(after.to_string()));
             }
-        } else {
-            out.push(span);
+            return TuiLine::from(spans);
         }
-        col = e;
     }
-    out
+    TuiLine::from(plain)
 }
 
 /// Modeline for a buffer, Emacs-style: `--`/`**` + `%` for read-only, name,

@@ -75,6 +75,11 @@ pub trait ScriptHost {
 
     /// Run the Lua `startup` function with the command-line file argument.
     fn run_startup(&mut self, path: Option<&str>, editor: &mut Editor) -> Result<()>;
+
+    /// Notify the scripting host that the files of the given buffers
+    /// changed on disk (inotify events); the Lua side applies the
+    /// auto-revert policy.
+    fn notify_file_changes(&mut self, ids: &[usize], editor: &mut Editor) -> Result<()>;
 }
 
 /// No-op host used when no scripting engine is attached.
@@ -115,6 +120,10 @@ impl ScriptHost for NullHost {
     }
 
     fn run_startup(&mut self, _path: Option<&str>, _editor: &mut Editor) -> Result<()> {
+        Ok(())
+    }
+
+    fn notify_file_changes(&mut self, _ids: &[usize], _editor: &mut Editor) -> Result<()> {
         Ok(())
     }
 }

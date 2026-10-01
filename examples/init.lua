@@ -42,13 +42,12 @@ end)
 -- emacs.read_key()                          -- -> "C-x", "RET", "a", ...
 
 ---------------------------------------------------------------------
--- 3. Major modes: per-buffer language, indentation, and local keymap.
+-- 3. Major modes: per-buffer indentation and local keymap.
 ---------------------------------------------------------------------
 
--- A Lua-defined major mode. `indent` is the indentation unit in spaces;
--- `language` (optional: "rust" / "lua" / "cpp") enables tree-sitter
--- highlighting. The keymap is active only in buffers using this mode, and
--- it shadows the global keymap.
+-- A Lua-defined major mode. `indent` is the indentation unit in spaces.
+-- The keymap is active only in buffers using this mode, and it shadows
+-- the global keymap.
 emacs.define_major_mode("txt-mode", {
   indent = 2,
   keymap = {
@@ -62,7 +61,6 @@ emacs.define_major_mode("txt-mode", {
 -- You can also redefine a built-in mode:
 -- emacs.define_major_mode("rust-mode", {
 --   indent = 2,
---   language = "rust",
 --   keymap = { ["C-c c"] = "insert-timestamp" },
 -- })
 
