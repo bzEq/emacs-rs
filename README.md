@@ -3,6 +3,12 @@
 An Emacs-like text editor with a minimal Rust core and LuaJIT for
 everything else — the way Emacs splits a small C core from Emacs Lisp.
 
+Scope: a small, fast **plain-text** editor. emacs-rs borrows Emacs's
+editing model (buffers, windows, modes, keymaps, minibuffer) but not its
+breadth: binary/unibyte buffers, text properties/overlays, and other
+heavyweight subsystems are intentionally out of scope. The Rust core stays
+minimal; policy and optional features live in Lua extensions.
+
 ## Architecture
 
 ```

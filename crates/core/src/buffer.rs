@@ -1,4 +1,21 @@
 //! Rope-backed text buffer with Emacs-style cursor semantics.
+//!
+//! # One concrete buffer type (Emacs's model, trimmed to scope)
+//!
+//! Even Emacs has a single `struct buffer`: a "binary buffer" is just a
+//! unibyte buffer, and the minibuffer, dired, *Help* and friends are
+//! ordinary buffers specialized by buffer-local state and modes — not by
+//! type. This port follows the single-type part: `Buffer` is one concrete
+//! type (the minibuffer is a registered Buffer with `minibuffer-mode`),
+//! and per-buffer behavior lives in the major mode, the local keymap, and
+//! minor modes. A trait hierarchy (`TextBuffer`/`BinaryBuffer`/...) would
+//! push dynamic dispatch through the whole core for no benefit here.
+//!
+//! emacs-rs is intentionally a small plain-text editor, not a full Emacs:
+//! unibyte/raw-byte storage, buffer-local variables, and text
+//! properties/overlays are out of scope, as are the subsystems built on
+//! them (binary editing, `hexl-mode`, rich display). The Rust core stays
+//! minimal; policy and optional features belong in Lua extensions.
 
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
