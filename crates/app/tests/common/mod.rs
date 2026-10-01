@@ -299,6 +299,22 @@ impl Em {
         for (k, v) in envs {
             cmd.env(k, v);
         }
+        // Give the child its own session with the pty as its controlling
+        // terminal.  crossterm's `terminal::size()` prefers `/dev/tty` over
+        // stdout, so without this the editor would render for the
+        // developer's terminal (when tests run from an interactive shell)
+        // while the harness emulates a fixed 24x80 pty.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let child = cmd
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
