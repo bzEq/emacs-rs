@@ -130,15 +130,18 @@ impl<'a> RowWalker<'a> {
         w
     }
 
+    /// Advance to the next line and skip remaining rows. Iterative: with
+    /// files of hundreds of thousands of lines, recursing per line would
+    /// overflow the stack.
     fn load(&mut self) {
-        if self.line < self.buf.len_lines() {
+        loop {
+            if self.line >= self.buf.len_lines() {
+                self.ranges.clear();
+                self.seg = 0;
+                return;
+            }
             self.ranges = wrap_ranges(self.buf.line(self.line), self.width);
             self.seg = 0;
-        } else {
-            self.ranges.clear();
-            self.seg = 0;
-        }
-        while self.remaining > 0 && self.line < self.buf.len_lines() {
             let rows = self.ranges.len();
             if self.remaining < rows {
                 self.seg = self.remaining;
@@ -147,7 +150,6 @@ impl<'a> RowWalker<'a> {
             }
             self.remaining -= rows;
             self.line += 1;
-            self.load();
         }
     }
 
