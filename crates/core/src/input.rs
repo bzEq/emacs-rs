@@ -241,10 +241,10 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
     match ed.lookup_key(&seq) {
         Lookup::Command(name) => {
             ed.clear_pending_keys();
-            // The command runs against the live minibuffer input state;
-            // capture it afterwards (finish_command clears it) so the
-            // read continues with the edits applied.  The input buffer
-            // itself is registered, so it is not part of the snapshot.
+            // The command runs against the live minibuffer input state; the
+            // read itself is untouched by finish_command, so the edits stay
+            // and the read continues.  A requested replay is dispatched in
+            // the minibuffer context.
             let outcome = match ed.call_command(&name, None) {
                 Ok(o) => o,
                 Err(e) => {
@@ -252,14 +252,8 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
                     CommandOutcome::Done
                 }
             };
-            let after = ed.minibuffer().cloned();
             if let Some(key) = ed.finish_command(outcome) {
-                let _ = key; // commands run from the minibuffer don't replay
-            }
-            if ed.pending().is_none() {
-                if let Some(mb) = after {
-                    ed.restore_minibuffer(mb);
-                }
+                return dispatch(ed, key);
             }
             update_completion(ed, false);
         }

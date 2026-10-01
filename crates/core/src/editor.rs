@@ -721,21 +721,22 @@ impl Editor {
         }
     }
 
-    /// Reinstall a saved minibuffer state (after a command ran while the
-    /// minibuffer was active).
-    pub fn restore_minibuffer(&mut self, mb: Minibuffer) {
-        let input = self
-            .buffers
-            .iter()
-            .find(|b| b.id == mb.buffer_id)
-            .map(|b| b.rope().to_string())
-            .unwrap_or_default();
-        self.pending = Some(PendingRequest::ReadString {
-            prompt: mb.prompt.clone(),
-            completion: mb.completion,
-            initial: input,
-        });
-        self.minibuffer = Some(mb);
+    /// Kill the minibuffer input buffer (if any) and drop its state.  Does
+    /// not touch the pending request; [`Editor::end_pending_read`] ends a
+    /// read as a whole.
+    fn end_minibuffer(&mut self) {
+        if let Some(old) = self.minibuffer.take() {
+            self.kill_buffer_at(old.buffer_id);
+        }
+    }
+
+    /// End the active pending read: its input has been answered, so the
+    /// minibuffer input buffer (if any) is killed and the pending request
+    /// cleared.  A command finishing (`finish_command`) never ends a read
+    /// by itself.
+    pub fn end_pending_read(&mut self) {
+        self.end_minibuffer();
+        self.pending = None;
     }
 
     /// C-n / C-p: step through the input history, recalling entries into
@@ -776,14 +777,14 @@ impl Editor {
         self.replay = true;
     }
 
-    /// Apply a command outcome: clear the minibuffer, store the pending
-    /// request (installing a fresh minibuffer for read-string requests).
-    /// Returns a key to replay through the normal dispatch, if requested.
+    /// Apply a command outcome.  `Done` only extracts a requested replay
+    /// key: it never ends a pending read (a read ends when its coroutine
+    /// is resumed with a value, [`Editor::end_pending_read`]), so a command
+    /// run from the minibuffer leaves the read in place.  A pending request
+    /// replaces any active one (a nested read).
     pub fn finish_command(&mut self, outcome: CommandOutcome) -> Option<Key> {
-        let previous = self.minibuffer.take();
         match outcome {
             CommandOutcome::Done => {
-                self.pending = None;
                 let key = if self.replay {
                     self.replay_key.take()
                 } else {
@@ -799,9 +800,7 @@ impl Editor {
                 initial,
             }) => {
                 // A nested read replaces the outer minibuffer (if any).
-                if let Some(old) = previous {
-                    self.kill_buffer_at(old.buffer_id);
-                }
+                self.end_minibuffer();
                 // The input is a real, registered buffer (Emacs's model):
                 // the minibuffer is the current buffer during the read.
                 let mut buf = Buffer::new(" *Minibuf*");
@@ -828,9 +827,7 @@ impl Editor {
                 None
             }
             CommandOutcome::Pending(p) => {
-                if let Some(old) = previous {
-                    self.kill_buffer_at(old.buffer_id);
-                }
+                self.end_minibuffer();
                 self.pending = Some(p);
                 None
             }
@@ -892,15 +889,12 @@ impl Editor {
         out
     }
 
-    /// Resume a suspended command coroutine.  A pending minibuffer read is
-    /// finished first: its input buffer is killed and the continuation runs
-    /// against the main buffer (Emacs: `read-from-minibuffer` returns, then
-    /// the caller continues).
+    /// Resume a suspended command coroutine.  The pending read ends first
+    /// (`end_pending_read`): the minibuffer input buffer is killed and the
+    /// continuation runs against the main buffer (Emacs:
+    /// `read-from-minibuffer` returns, then the caller continues).
     pub fn resume_pending(&mut self, value: ResumeValue) -> Result<CommandOutcome> {
-        if let Some(old) = self.minibuffer.take() {
-            self.kill_buffer_at(old.buffer_id);
-        }
-        self.pending = None;
+        self.end_pending_read();
         let mut out = Err(anyhow!("no script host attached"));
         self.with_host(|ed, host| {
             out = host.resume_pending(value, ed);
@@ -1168,11 +1162,21 @@ mod tests {
             Some(PendingRequest::ReadString { .. })
         ));
         assert!(ed.minibuffer().unwrap().completion);
-        // Done clears both
+        let mb_id = ed.minibuffer().unwrap().buffer_id;
+        // A finished nested command does NOT end the read ...
         let key = ed.finish_command(CommandOutcome::Done);
         assert!(key.is_none());
+        assert!(ed.minibuffer().is_some(), "Done does not end a read");
+        assert!(matches!(
+            ed.pending(),
+            Some(PendingRequest::ReadString { .. })
+        ));
+        // ... only answering it (end_pending_read) does; the input buffer
+        // is a real registered buffer and gets killed.
+        ed.end_pending_read();
         assert!(ed.minibuffer().is_none());
         assert!(ed.pending().is_none());
+        assert!(!ed.buffers().iter().any(|b| b.id == mb_id));
     }
 
     #[test]
