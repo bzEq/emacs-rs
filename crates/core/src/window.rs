@@ -98,6 +98,14 @@ impl WindowTree {
         }
     }
 
+    /// The leaf window at `path` (paths come from `layout`).
+    pub fn leaf_mut(&mut self, path: &[usize]) -> &mut Window {
+        match self.node_at_mut(path) {
+            Node::Leaf(w) => w,
+            Node::Pair(..) => unreachable!("path must lead to a leaf"),
+        }
+    }
+
     pub fn selected_buffer(&self) -> usize {
         self.selected().buffer
     }

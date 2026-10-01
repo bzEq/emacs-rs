@@ -190,3 +190,63 @@ fn isearch_failing_and_abort() {
     assert!(em.wait_for("L1 C0", 3000), "point back at start");
     em.quit();
 }
+
+#[test]
+fn page_up_then_split_keeps_cursor_in_selected_window() {
+    // Regression: on a file with wrapped long lines, M->, M-v x6, C-x 3
+    // used to lose the cursor (stale width-dependent row caches after the
+    // split) and stall for seconds. The cursor must be drawn inside the
+    // new right-hand window.
+    let em = Em::spawn();
+    let content: String = (0..300)
+        .map(|i| {
+            format!("line {i} some long text to wrap around the window width many times over\n")
+        })
+        .collect();
+    let path = write_file(&em.scratch, "t.txt", &content);
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("line 0", 5000));
+    em.keys(b"\x1b>"); // M->
+    assert!(em.wait_for("line 299", 5000), "end of buffer visible");
+    for _ in 0..6 {
+        em.keys(b"\x1bv"); // M-v
+    }
+    assert!(em.wait_for("line 170", 5000), "scrolled up six pages");
+    em.keys(b"\x18\x1b"); // C-x 3
+    assert!(
+        em.wait_for("\u{2502}", 5000),
+        "vertical divider drawn between the side-by-side panes"
+    );
+    let (col, row) = em.last_cursor_pos().expect("cursor drawn");
+    assert!(
+        col > 40,
+        "cursor in the right (selected) window, got col {col}"
+    );
+    assert!(row <= 22, "cursor in the body, got row {row}");
+    em.quit();
+}
+
+#[test]
+fn beginning_of_buffer_returns_after_end() {
+    // Regression: M-> then M-< on a file with lines exactly as wide as
+    // the window (content = 80 chars + newline) used to land mid-file:
+    // the scroll's row fast paths counted those lines as one row while
+    // the render walkers counted two, so the backward walk overshot.
+    let em = Em::spawn();
+    let content: String = (0..100)
+        .map(|i| format!("{:<80}\n", format!("line {i}")))
+        .collect();
+    let path = write_file(&em.scratch, "t.txt", &content);
+    let path_s = path.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&path_s]);
+    assert!(em.wait_for("line 0", 5000));
+    em.keys(b"\x1b>"); // M->
+    assert!(em.wait_for("line 99", 5000), "end of buffer visible");
+    em.keys(b"\x1b<"); // M-<
+    assert!(
+        em.wait_for_row(0, "line 0", 5000),
+        "back at the first line after M-<"
+    );
+    em.quit();
+}

@@ -332,10 +332,12 @@ fn to_key(ke: &crossterm::event::KeyEvent) -> Option<Key> {
 fn handle_key(ed: &mut Editor, key: Key) -> Result<()> {
     if std::env::var_os("EM_DEBUG_KEYS").is_some() {
         eprintln!(
-            "em: key code={:?} mods={:?} -> {key} (pending={:?})",
+            "em: key code={:?} mods={:?} -> {key} (pending={:?}, keys={:?}, esc={})",
             key.code,
             key.mods,
-            ed.pending()
+            ed.pending(),
+            ed.pending_keys(),
+            ed.esc_prefix()
         );
     }
     let key = translate_after_ctrl_x(ed, key);

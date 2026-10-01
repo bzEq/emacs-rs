@@ -353,15 +353,31 @@ impl Editor {
         self.window_cols = cols;
     }
 
-    /// Keep the selected window's view scrolled so the cursor is visible.
+    /// Keep every window's view scrolled so its point stays visible. All
+    /// windows scroll: a width change (resize, C-x 3) shifts the visual
+    /// rows of even unselected windows.
     pub fn scroll_current_view(&mut self) {
-        let id = self.windows.selected_buffer();
-        let idx = self.buffer_index(id);
-        let rows = self.selected_window_height();
-        let cols = self.selected_window_width();
-        let buf = &mut self.buffers[idx];
-        let w = self.windows.selected_mut();
-        w.view.scroll_to_cursor(buf, cols, rows);
+        let body = self.body_rect();
+        let selected_path = self.windows.selected_path().to_vec();
+        let items: Vec<(Vec<usize>, Option<usize>, usize, crate::window::Rect)> = self
+            .windows
+            .layout(body)
+            .into_iter()
+            .map(|(path, w, rect)| (path, w.point, w.buffer, rect))
+            .collect();
+        for (path, saved, buffer, rect) in items {
+            let selected = path == selected_path;
+            let idx = self.buffer_index(buffer);
+            let point = if selected {
+                self.buffers[idx].point()
+            } else {
+                saved.unwrap_or(self.buffers[idx].point())
+            };
+            let buf = &self.buffers[idx];
+            let w = self.windows.leaf_mut(&path);
+            w.view
+                .scroll_to(buf, rect.w.max(1) as usize, rect.h.max(1) as usize, point);
+        }
     }
 
     pub fn page_down_current(&mut self) {

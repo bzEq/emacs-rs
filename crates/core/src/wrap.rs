@@ -30,6 +30,10 @@ pub fn visual_width(content: RopeSlice<'_>) -> usize {
 
 /// Split a line's content into (start, end) char ranges, one per visual
 /// row of `width` columns, breaking at the last whitespace when possible.
+///
+/// Single pass over the chars: after a row breaks at a space, only the
+/// short tail since that space is replayed as the next row's head (at most
+/// `width` chars), so this is O(chars) and safe to call on huge lines.
 pub fn wrap_ranges(content: RopeSlice<'_>, width: usize) -> Vec<(usize, usize)> {
     let width = width.max(1);
     let n = content.len_chars();
@@ -37,64 +41,101 @@ pub fn wrap_ranges(content: RopeSlice<'_>, width: usize) -> Vec<(usize, usize)> 
         return vec![(0, 0)];
     }
     let mut out = Vec::new();
+    // (char index, char) of the current row, from its start.
+    let mut row: Vec<(usize, char)> = Vec::new();
     let mut start = 0usize;
-    while start < n {
-        let mut col = 0usize;
-        let mut last_space: Option<usize> = None; // char index just past a whitespace
-        let mut end = n;
-        for (j, c) in content.slice(start..).chars().enumerate() {
-            let idx = start + j;
-            let w = char_width(c, col);
-            if col + w > width && idx > start {
-                end = match last_space {
-                    Some(ls) if ls > start => ls,
-                    _ => idx,
-                };
-                break;
+    let mut col = 0usize;
+    // Char index one past the last whitespace of the current row.
+    let mut last_space: Option<usize> = None;
+    for (idx, c) in content.chars().enumerate() {
+        let w = char_width(c, col);
+        if col + w > width && !row.is_empty() {
+            let end = match last_space {
+                Some(ls) if ls > start => ls,
+                _ => idx,
+            };
+            out.push((start, end));
+            // The chars since `end` start the next row: replay them (they
+            // are at most `width` long) to rebuild the column and space
+            // state, then fall through to consume `c`.
+            row.retain(|(i, _)| *i >= end);
+            col = 0;
+            last_space = None;
+            for (i, cc) in &row {
+                if cc.is_whitespace() {
+                    last_space = Some(i + 1);
+                }
+                col += char_width(*cc, col);
             }
-            if c.is_whitespace() {
-                last_space = Some(idx + 1);
-            }
-            col += w;
+            start = end;
         }
-        out.push((start, end));
-        start = end;
+        if c.is_whitespace() {
+            last_space = Some(idx + 1);
+        }
+        col += w;
+        row.push((idx, c));
     }
+    out.push((start, n));
     out
 }
 
 /// Count the visual rows of `content` at `width` without allocating any
 /// ranges (used when skipping lines during scroll walks, which must stay
 /// cheap: large files walk hundreds of thousands of lines per frame).
+/// This is `wrap_ranges(...).len()`, so it always agrees with wrapping.
 pub fn row_count(content: RopeSlice<'_>, width: usize) -> usize {
     let width = width.max(1);
     let n = content.len_chars();
     if n == 0 {
         return 1;
     }
-    let mut rows = 0usize;
-    let mut start = 0usize;
-    while start < n {
-        let mut col = 0usize;
-        let mut last_space: Option<usize> = None;
-        let mut end = n;
-        for (j, c) in content.slice(start..).chars().enumerate() {
-            let idx = start + j;
-            let w = char_width(c, col);
-            if col + w > width && idx > start {
-                end = match last_space {
-                    Some(ls) if ls > start => ls,
-                    _ => idx,
-                };
-                break;
-            }
-            if c.is_whitespace() {
-                last_space = Some(idx + 1);
-            }
-            col += w;
+    // Fast path for contiguous ASCII lines without tabs: one byte per
+    // column, no allocations, so counting millions of lines stays cheap.
+    if let Some(s) = content.as_str() {
+        if s.is_ascii() && !s.as_bytes().contains(&b'\t') {
+            return ascii_row_count(s.as_bytes(), width);
         }
-        rows += 1;
-        start = end;
+    }
+    wrap_ranges(content, width).len()
+}
+
+/// Row count of an ASCII line (no tabs), one byte per column. Replays the
+/// short tail after a space break, so this is O(bytes).
+fn ascii_row_count(bytes: &[u8], width: usize) -> usize {
+    let mut rows = 1usize;
+    let mut col = 0usize;
+    let mut row_start = 0usize;
+    let mut last_space: Option<usize> = None; // one past the whitespace
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if col + 1 > width && i > row_start {
+            rows += 1;
+            match last_space {
+                Some(ls) if ls > row_start => {
+                    // re-measure the tail since the space as the new row
+                    col = 0;
+                    last_space = None;
+                    for (k, &kb) in bytes.iter().enumerate().take(i).skip(ls) {
+                        if kb.is_ascii_whitespace() {
+                            last_space = Some(k + 1);
+                        }
+                        col += 1;
+                    }
+                    row_start = ls;
+                }
+                _ => {
+                    col = 0;
+                    last_space = None;
+                    row_start = i;
+                }
+            }
+        }
+        if b.is_ascii_whitespace() {
+            last_space = Some(i + 1);
+        }
+        col += 1;
+        i += 1;
     }
     rows
 }
@@ -137,10 +178,19 @@ pub fn rows_between(buf: &Buffer, width: usize, from: usize, to: usize) -> usize
             if line_end < line_start {
                 continue; // newline before the starting line
             }
-            rows += if line_end - line_start <= width + 1 {
-                1 // short enough that it cannot wrap
+            rows += if line_end - line_start < width {
+                1 // content shorter than a full row cannot wrap
+            } else if line_start >= chunk_byte {
+                // the whole line lives in this chunk: count its rows from
+                // the bytes directly (no rope slicing per line)
+                let lb = &bytes[line_start - chunk_byte..rel + 1];
+                if lb.is_ascii() && !lb.contains(&b'\t') {
+                    ascii_row_count(lb, width)
+                } else {
+                    row_count(rope.byte_slice(line_start..line_end + 1), width)
+                }
             } else {
-                row_count(rope.slice(line_start..line_end + 1), width)
+                row_count(rope.byte_slice(line_start..line_end + 1), width)
             };
             line_start = line_end + 1;
         }
@@ -282,10 +332,20 @@ impl<'a> RowWalker<'a> {
                         if line_end < line_start {
                             continue; // newline before the starting line
                         }
-                        let rows = if line_end - line_start <= width + 1 {
+                        let rows = if line_end - line_start < width {
                             1
+                        } else if line_start >= chunk_byte {
+                            let lb = &chunk.as_bytes()[line_start - chunk_byte..rel + 1];
+                            if lb.is_ascii() && !lb.contains(&b'\t') {
+                                ascii_row_count(lb, width)
+                            } else {
+                                row_count(
+                                    self.buf.rope().byte_slice(line_start..line_end + 1),
+                                    width,
+                                )
+                            }
                         } else {
-                            row_count(self.buf.rope().slice(line_start..line_end + 1), width)
+                            row_count(self.buf.rope().byte_slice(line_start..line_end + 1), width)
                         };
                         if skip < rows {
                             self.ranges = wrap_ranges(self.buf.line(lines), width);
@@ -423,5 +483,90 @@ mod tests {
         assert_eq!((line, seg, s, e), (0, 2, 10, 15));
         let (line, seg, s, e) = w.next_row().unwrap();
         assert_eq!((line, seg, s, e), (1, 0, 0, 5));
+    }
+
+    #[test]
+    fn row_count_matches_wrap_ranges() {
+        // The row counter must agree with the range-based wrapping for
+        // every width on a mix of short and long lines.
+        let text = "short line\n".to_string()
+            + "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm\n"
+            + "averyveryverylongwordthatbreaksmidword\n"
+            + "one two three four five six seven eight nine ten eleven twelve\n";
+        let rope = rope(&text);
+        for width in 1..=40 {
+            for line in rope.lines() {
+                let ranges = wrap_ranges(line, width);
+                assert_eq!(ranges.len(), row_count(line, width), "width {width}");
+                let mut last = 0usize;
+                for (s, e) in &ranges {
+                    assert_eq!(*s, last, "ranges are contiguous");
+                    last = *e;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ascii_fast_path_agrees_with_general_path() {
+        // The byte-level counter is exercised through `row_count` on a
+        // contiguous ASCII rope; compare against the char-based ranges.
+        let mut text = String::new();
+        for i in 0..500 {
+            text.push_str(&format!("some words and text {i} wrap me please now\n"));
+        }
+        let rope = rope(&text);
+        for width in [5usize, 17, 39, 80] {
+            for line in rope.lines().take(100) {
+                assert_eq!(row_count(line, width), wrap_ranges(line, width).len());
+            }
+        }
+    }
+
+    #[test]
+    fn rows_between_counts_long_lines() {
+        let mut b = Buffer::new("test");
+        // at width 5 "hello world\n" wraps to 4 rows (the trailing
+        // newline counts as a char), "foo bar\n" and "baz qux\n" to 2
+        b.insert("hello world\nfoo bar\nbaz qux\n");
+        assert_eq!(rows_between(&b, 5, 0, 3), 8);
+        assert_eq!(rows_between(&b, 5, 1, 3), 4);
+        assert_eq!(rows_between(&b, 5, 0, 1), 4);
+        // a width that fits everything: one row per line
+        assert_eq!(rows_between(&b, 80, 0, 3), 3);
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn exact_width_content_wraps_to_two_rows() {
+        // A line of exactly `width` content chars plus the trailing
+        // newline occupies two visual rows: the newline overflows the
+        // first row. The fast paths must agree with wrap_ranges here
+        // (they used to count it as one row, desyncing the scroll and
+        // the walkers by one row per such line).
+        let mut b = Buffer::new("test");
+        let content = "x".repeat(80);
+        b.insert(&format!("{content}\n"));
+        let rope = b.rope();
+        assert_eq!(wrap_ranges(b.line(0), 80), vec![(0, 80), (80, 81)]);
+        assert_eq!(row_count(b.line(0), 80), 2);
+        assert_eq!(rows_between(&b, 80, 0, 1), 2);
+        assert_eq!(rows_between(&b, 80, 0, rope.len_lines()), 2);
+        // one char shorter fits on a single row
+        b.insert("x");
+        assert_eq!(
+            row_count(b.line(0), 80),
+            2,
+            "81 chars + newline still wraps"
+        );
+        let mut c = Buffer::new("test");
+        c.insert(&format!("{}\n", "y".repeat(79)));
+        assert_eq!(wrap_ranges(c.line(0), 80), vec![(0, 80)]);
+        assert_eq!(row_count(c.line(0), 80), 1);
+        assert_eq!(rows_between(&c, 80, 0, c.rope().len_lines()), 1);
     }
 }

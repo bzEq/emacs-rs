@@ -62,9 +62,10 @@ fn render_window(
     let width = text_rect.width.max(1) as usize;
     let region = buf.region();
     // Use the previous frame's hint to skip to the first visible row in
-    // O(delta); validate it against the buffer length (edits invalidate).
+    // O(delta); validate it against the buffer length and width (edits and
+    // resizes/splits invalidate).
     let hint = view.hint.get();
-    let mut walker = if hint.3 == buf.len_chars() && hint.1 < buf.len_lines() {
+    let mut walker = if hint.3 == buf.len_chars() && hint.4 == width && hint.1 < buf.len_lines() {
         RowWalker::from_hint(buf, width, hint.0, hint.1, hint.2, view.top_row)
     } else {
         RowWalker::new(buf, width, view.top_row)
@@ -219,7 +220,7 @@ fn highlight_range(
 
 /// Modeline for a buffer, Emacs-style: `--`/`**` + `%` for read-only, name,
 /// modes (major + enabled minors' lighters), point position, line count.
-fn modeline(buf: &emacs_core::buffer::Buffer, ed: &Editor) -> String {
+fn modeline(buf: &emacs_core::buffer::Buffer, ed: &Editor, width: usize) -> String {
     let modified = if buf.modified() { "**" } else { "--" };
     let ro = if buf.read_only() { "%" } else { "-" };
     let file = buf
@@ -233,12 +234,31 @@ fn modeline(buf: &emacs_core::buffer::Buffer, ed: &Editor) -> String {
             modes.push_str(&def.lighter);
         }
     }
-    format!(
-        "-{modified}{ro}-  {file}  ({modes})  L{} C{}  {} lines",
+    let head = format!("-{modified}{ro}-  {file}  ({modes})  ");
+    let position = format!(
+        "L{} C{}  {} lines",
         buf.line_of_point() + 1,
         buf.column(),
         buf.len_lines()
-    )
+    );
+    let line = format!("{head}{position}");
+    // The position part stays visible: long paths truncate from the left
+    // (Emacs shows the file's tail, not the head).
+    if line.chars().count() <= width {
+        line
+    } else {
+        let keep = width.saturating_sub(position.chars().count() + 1);
+        format!("…{}{position}", tail_chars(&head, keep))
+    }
+}
+
+/// The last `n` chars of `s` (char-based, not byte-based).
+fn tail_chars(s: &str, n: usize) -> String {
+    let len = s.chars().count();
+    if len <= n {
+        return s.to_string();
+    }
+    s.chars().skip(len - n).collect()
 }
 
 /// Render the editor: all windows, modeline, echo area (which doubles as the
@@ -318,7 +338,10 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
         .add_modifier(Modifier::BOLD);
     if let Some(selected) = layouts.iter().find(|l| l.selected) {
         frame.render_widget(
-            Paragraph::new(Span::styled(modeline(selected.buf, ed), ml_style)),
+            Paragraph::new(Span::styled(
+                modeline(selected.buf, ed, modeline_rect.width as usize),
+                ml_style,
+            )),
             modeline_rect,
         );
     }
@@ -421,7 +444,7 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     let point_line = buf.line_of_point();
     let point_col = point - buf.rope().line_to_char(point_line);
     let hint = selected.view.hint.get();
-    let mut walker = if hint.3 == buf.len_chars() && hint.1 < buf.len_lines() {
+    let mut walker = if hint.3 == buf.len_chars() && hint.4 == width && hint.1 < buf.len_lines() {
         RowWalker::from_hint(buf, width, hint.0, hint.1, hint.2, selected.view.top_row)
     } else {
         RowWalker::new(buf, width, selected.view.top_row)
