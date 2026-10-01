@@ -187,10 +187,8 @@ fn file_completion_lists_dir_entries() {
     // ask completion through a find-file prompt
     le.command_reading("find-file");
     let input = format!("{}/a", t.path());
-    if let Some(mb) = le.ed.minibuffer_mut() {
-        for c in input.chars() {
-            mb.insert_char(c);
-        }
+    for c in input.chars() {
+        le.ed.minibuffer_insert_char(c);
     }
     let cands = le.ed.update_completion(&input).unwrap();
     assert_eq!(cands, vec![format!("{}/alpha.txt", t.path())]);
@@ -208,10 +206,8 @@ fn find_file_prompt_offers_relative_completions() {
     le.startup(Some(&f.display().to_string()));
     le.command_reading("find-file");
     let input = "al";
-    if let Some(mb) = le.ed.minibuffer_mut() {
-        for c in input.chars() {
-            mb.insert_char(c);
-        }
+    for c in input.chars() {
+        le.ed.minibuffer_insert_char(c);
     }
     let cands = le.ed.update_completion(input).unwrap();
     assert_eq!(
@@ -228,10 +224,8 @@ fn m_x_completion_prefers_prefix_matches() {
     // completion state is computed by the Lua layer
     le.command_reading("execute-extended-command");
     let input = "des";
-    if let Some(mb) = le.ed.minibuffer_mut() {
-        for c in input.chars() {
-            mb.insert_char(c);
-        }
+    for c in input.chars() {
+        le.ed.minibuffer_insert_char(c);
     }
     let cands = le.ed.update_completion(input).unwrap();
     assert_eq!(
@@ -247,10 +241,8 @@ fn m_x_completion_falls_back_to_substring() {
     let mut le = LuaEd::new();
     le.command_reading("execute-extended-command");
     let input = "indow";
-    if let Some(mb) = le.ed.minibuffer_mut() {
-        for c in input.chars() {
-            mb.insert_char(c);
-        }
+    for c in input.chars() {
+        le.ed.minibuffer_insert_char(c);
     }
     let cands = le.ed.update_completion(input).unwrap();
     assert!(

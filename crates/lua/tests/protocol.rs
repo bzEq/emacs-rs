@@ -98,6 +98,45 @@ fn read_string_protocol() {
 }
 
 #[test]
+fn minibuffer_is_a_registered_buffer_with_its_mode() {
+    let mut le = LuaEd::new();
+    le.command_reading("find-file");
+    let id = le.ed.current_buffer_id();
+    assert_ne!(id, le.ed.selected_buffer_id(), "the minibuffer is current");
+    let buf = le
+        .ed
+        .buffers()
+        .iter()
+        .find(|b| b.id == id)
+        .expect("the minibuffer is a real buffer");
+    assert_eq!(buf.name(), " *Minibuf*");
+    assert_eq!(buf.mode().name, "minibuffer-mode");
+    assert!(
+        buf.local_keymap().is_some(),
+        "minibuffer-mode installs a buffer-local keymap"
+    );
+    assert!(
+        !buf.modified(),
+        "the pre-filled input is not a modification"
+    );
+
+    // its local keymap is consulted by the normal lookup
+    le.ed.push_key(emacs_core::key::Key::ctrl('p'));
+    let seq = le.ed.pending_keys().to_vec();
+    assert_eq!(
+        le.ed.lookup_key(&seq),
+        emacs_core::keymap::Lookup::Command("minibuf-previous-history".into())
+    );
+    le.ed.clear_pending_keys();
+
+    le.abort();
+    assert!(
+        !le.ed.buffers().iter().any(|b| b.id == id),
+        "finishing the read kills the minibuffer buffer"
+    );
+}
+
+#[test]
 fn read_string_abort_inserts_nothing() {
     let mut le = with_init();
     le.command_reading("ask-and-insert");

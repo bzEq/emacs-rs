@@ -203,7 +203,9 @@ end, "Stop the editor and hand the terminal back to the shell; `fg` resumes it."
 M.define("save-buffers-kill-terminal", function()
   local modified = {}
   for _, id in ipairs(raw.buffer_ids()) do
-    if raw.buffer_info(id).modified then
+    local info = raw.buffer_info(id)
+    -- the minibuffer is a real buffer, but it is never saved
+    if info.modified and not info.minibuffer then
       modified[#modified + 1] = id
     end
   end

@@ -168,12 +168,22 @@ pub fn scratch_dir() -> PathBuf {
     unique_scratch()
 }
 
-/// Locate the `em` binary. Cargo sets `CARGO_BIN_EXE_em` when all tests run;
-/// when a single test target is selected with `--test`, it does not build
-/// the binary, so fall back to the target directory layout.
+/// Locate the `em` binary. Cargo sets `CARGO_BIN_EXE_em` when it builds the
+/// binary for the tests; otherwise derive it from this test executable,
+/// which lives in `<target>/<profile>/deps/` — that respects
+/// `CARGO_TARGET_DIR`, custom profiles, and cross builds, so the tests
+/// always run the binary built by the same `cargo test` invocation.
 pub fn em_binary() -> PathBuf {
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_em") {
         return PathBuf::from(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent().and_then(|d| d.parent()) {
+            let path = dir.join("em");
+            if path.exists() {
+                return path;
+            }
+        }
     }
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

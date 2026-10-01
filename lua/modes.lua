@@ -16,6 +16,18 @@ emacs.define_major_mode("cpp-mode", {
   indent = 4,
 })
 
+-- While a minibuffer read is active, the input line is a real buffer with
+-- this major mode; the keymap below is its buffer-local map (Emacs's
+-- minibuffer-local-map), consulted before the global map.
+emacs.define_major_mode("minibuffer-mode", {
+  keymap = {
+    ["C-p"] = "minibuf-previous-history",
+    ["C-n"] = "minibuf-next-history",
+    ["<up>"] = "minibuf-previous-history",
+    ["<down>"] = "minibuf-next-history",
+  },
+})
+
 emacs.define_minor_mode("line-numbers", {
   lighter = "Ln",
   doc = "Display line numbers in the gutter.",

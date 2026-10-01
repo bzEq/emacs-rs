@@ -334,9 +334,9 @@ end
 function M.complete_buffer_names(input)
   local names = {}
   for _, id in ipairs(raw.buffer_ids()) do
-    local n = raw.buffer_info(id).name
-    if n:sub(1, #input) == input then
-      names[#names + 1] = n
+    local info = raw.buffer_info(id)
+    if not info.minibuffer and info.name:sub(1, #input) == input then
+      names[#names + 1] = info.name
     end
   end
   table.sort(names)

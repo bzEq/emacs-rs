@@ -480,14 +480,12 @@ fn update_completion(ed: &mut Editor, fill: bool) {
     if !has_completion {
         return;
     }
-    let input = ed.minibuffer().map(|mb| mb.input()).unwrap_or_default();
+    let input = ed.minibuffer_input();
     let candidates = ed.update_completion(&input).unwrap_or_default();
-    if let Some(mb) = ed.minibuffer_mut() {
-        mb.complete_with(candidates, fill);
-    }
+    ed.minibuffer_complete_with(candidates, fill);
     // recompute against the (possibly extended) input so the displayed
     // candidates always match what is in the minibuffer
-    let input = ed.minibuffer().map(|mb| mb.input()).unwrap_or_default();
+    let input = ed.minibuffer_input();
     let candidates = ed.update_completion(&input).unwrap_or_default();
     if let Some(mb) = ed.minibuffer_mut() {
         mb.candidates = candidates;
@@ -538,7 +536,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
     }
     match key.code {
         Enter => {
-            let input = ed.minibuffer().map(|mb| mb.accepted()).unwrap_or_default();
+            let input = ed.minibuffer_accepted();
             ed.clear_pending_keys();
             ed.push_minibuffer_history(input.clone());
             return resume(ed, ResumeValue::String(Some(input)));
@@ -549,41 +547,42 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
                 .minibuffer()
                 .map(|mb| mb.candidates.clone())
                 .unwrap_or_default();
-            if let Some(mb) = ed.minibuffer_mut() {
-                mb.accept_preview();
-            }
+            ed.minibuffer_accept_preview();
             update_completion(ed, true);
             if !had_preview {
                 // nothing to accept: cycle through candidates instead
+                let input = ed.minibuffer_input();
                 if let Some(mb) = ed.minibuffer_mut() {
                     // after cycling to a full name the candidate set
                     // collapses to that one entry; keep cycling over the
                     // previous set instead
                     if mb.candidates.len() < 2 && prev_cands.len() >= 2 {
                         mb.candidates = prev_cands;
-                        let pos = mb.candidates.iter().position(|c| *c == mb.input());
+                        let pos = mb.candidates.iter().position(|c| *c == input);
                         mb.cycle = match pos {
                             Some(i) => i, // cycle() advances to the next
                             None => usize::MAX,
                         };
                     }
-                    mb.cycle();
                 }
+                ed.minibuffer_cycle();
             }
             return Ok(());
         }
         _ => {}
     }
 
-    // minibuffer-local keymap, then the global keymap, then self-insert
+    // the minibuffer's buffer-local keymap (minibuffer-mode), then the
+    // global keymap, then self-insert
     ed.push_key(key);
     let seq = ed.pending_keys().to_vec();
-    match ed.lookup_minibuffer_key(&seq) {
+    match ed.lookup_key(&seq) {
         Lookup::Command(name) => {
             ed.clear_pending_keys();
             // The command runs against the live minibuffer input state;
             // capture it afterwards (finish_command clears it) so the
-            // read continues with the edits applied.
+            // read continues with the edits applied.  The input buffer
+            // itself is registered, so it is not part of the snapshot.
             let outcome = match ed.call_command(&name, None) {
                 Ok(o) => o,
                 Err(e) => {
@@ -608,9 +607,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
             ed.clear_pending_keys();
             if insert {
                 if let Char(c) = key.code {
-                    if let Some(mb) = ed.minibuffer_mut() {
-                        mb.insert_char(c);
-                    }
+                    ed.minibuffer_insert_char(c);
                     update_completion(ed, true);
                 }
             }

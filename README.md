@@ -52,12 +52,17 @@ directory, so users can redefine any part of the editor from their
     input, Emacs-style), keeps an input history (`C-p`/`C-n` recall), and
     supports `C-f`/`C-b`/`C-a`/`C-e`/`C-d` editing; typing `/` over the
     pre-filled directory replaces it (file-name-shadow)
-  - The minibuffer has its own keymap (defined in Lua, like Emacs's
-    `minibuffer-local-map`) that inherits the global map: user bindings
-    keep working while the minibuffer is active (`C-x C-c` quits from
-    there, custom keys run normally)
+  - The minibuffer input is a real, registered buffer with its own major
+    mode (`minibuffer-mode`) and buffer-local keymap, like Emacs's
+    `minibuffer-local-map`: it overrides the global map for the keys it
+    binds, and everything else falls through, so user bindings keep
+    working while the minibuffer is active (`C-x C-c` quits from there,
+    custom keys run normally). Redefine `minibuffer-mode` from init.lua
+    to change its bindings.
   - Incremental search: `C-s` / `C-r`, case-insensitive, wraps around,
-    `C-g` aborts
+    `C-g` aborts; the search keys are dispatched through an overriding
+    keymap (`M.isearch_bindings`, Emacs's `overriding-terminal-local-map`)
+    that can be customized with `emacs.bind_isearch`
   - Undo (with boundaries), kill ring (consecutive kills accumulate),
     prefix arguments (`C-u`/`C-3`) — all implemented in Lua
   - Active region: after `C-SPC` the text between point and mark is
@@ -121,7 +126,7 @@ auto-loaded: `dofile` them from `init.lua`.
 | `search.lua` | incremental search, its keymap and commands (`emacs.bind_isearch`) |
 | `windows.lua` | window commands |
 | `files.lua` | find/save/write/switch/kill-buffer, file completion |
-| `modes.lua` | built-in major and minor modes |
+| `modes.lua` | built-in major and minor modes (`minibuffer-mode` keymap included) |
 | `dired.lua` | the directory editor |
 | `help.lua` | `M-x`, describe-key, describe-bindings |
 | `bindings.lua` | the default global keymap |

@@ -587,6 +587,10 @@ impl LuaHost {
                 t.set("path", b.path().map(|p| p.display().to_string()))?;
                 t.set("modified", b.modified())?;
                 t.set("read_only", b.read_only())?;
+                t.set(
+                    "minibuffer",
+                    ed.minibuffer().is_some_and(|mb| mb.buffer_id == id),
+                )?;
                 Ok(t)
             })?,
         )?;
@@ -761,23 +765,12 @@ impl LuaHost {
             })?,
         )?;
         raw.set(
-            "bind_minibuffer",
-            lua.create_function(|lua, (seq, cmd): (String, String)| {
-                let keys =
-                    emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
-                editor_ref(lua)?
-                    .minibuffer_keymap_mut()
-                    .bind_sequence(&keys, &cmd);
-                Ok(())
-            })?,
-        )?;
-        raw.set(
             "local_set_key",
             lua.create_function(|lua, (seq, cmd): (String, String)| {
                 let keys =
                     emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
                 let ed = editor_ref(lua)?;
-                let idx = ed.selected_buffer_index();
+                let idx = ed.current_buffer_index();
                 ed.local_set_key(idx, &keys, &cmd);
                 Ok(())
             })?,
@@ -788,6 +781,33 @@ impl LuaHost {
                 let keys =
                     emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
                 match editor_ref(lua)?.lookup_key(&keys) {
+                    Lookup::Command(name) => Ok(("command", Some(name))),
+                    Lookup::Prefix => Ok(("prefix", None)),
+                    Lookup::Unbound => Ok(("unbound", None)),
+                }
+            })?,
+        )?;
+        raw.set(
+            "set_overriding_keymap",
+            lua.create_function(|lua, table: Option<Table>| {
+                let km = parse_keymap_table(lua, table)?.unwrap_or_else(Keymap::new);
+                editor_ref(lua)?.set_overriding_keymap(km);
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "clear_overriding_keymap",
+            lua.create_function(|lua, ()| {
+                editor_ref(lua)?.clear_overriding_keymap();
+                Ok(())
+            })?,
+        )?;
+        raw.set(
+            "lookup_overriding_key",
+            lua.create_function(|lua, seq: String| {
+                let keys =
+                    emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
+                match editor_ref(lua)?.lookup_overriding_key(&keys) {
                     Lookup::Command(name) => Ok(("command", Some(name))),
                     Lookup::Prefix => Ok(("prefix", None)),
                     Lookup::Unbound => Ok(("unbound", None)),
@@ -876,7 +896,7 @@ impl LuaHost {
             "set_buffer_mode",
             lua.create_function(|lua, name: String| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.selected_buffer_index();
+                let idx = ed.current_buffer_index();
                 ed.set_buffer_mode_by_name(idx, &name)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
@@ -885,7 +905,7 @@ impl LuaHost {
             "minor_mode_enable",
             lua.create_function(|lua, name: String| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.selected_buffer_index();
+                let idx = ed.current_buffer_index();
                 ed.set_minor_mode(idx, &name, true)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
@@ -894,7 +914,7 @@ impl LuaHost {
             "minor_mode_disable",
             lua.create_function(|lua, name: String| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.selected_buffer_index();
+                let idx = ed.current_buffer_index();
                 ed.set_minor_mode(idx, &name, false)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
@@ -903,7 +923,7 @@ impl LuaHost {
             "minor_mode_toggle",
             lua.create_function(|lua, name: String| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.selected_buffer_index();
+                let idx = ed.current_buffer_index();
                 ed.toggle_minor_mode(idx, &name)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
@@ -912,7 +932,7 @@ impl LuaHost {
             "minor_mode_enabled",
             lua.create_function(|lua, name: String| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.selected_buffer_index();
+                let idx = ed.current_buffer_index();
                 Ok(ed.minor_mode_enabled(idx, &name))
             })?,
         )?;

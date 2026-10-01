@@ -26,8 +26,6 @@ pub enum KeymapSource {
     /// An enabled minor mode keymap; index into the buffer's enabled list,
     /// 0 = most recently enabled.
     Minor(usize),
-    /// The minibuffer-local keymap (active while reading input).
-    Minibuffer,
 }
 
 /// One window's rendering info, handed to the UI.
@@ -50,9 +48,6 @@ pub struct Editor {
     /// True if `echo` is an error.
     echo_error: bool,
     minibuffer: Option<Minibuffer>,
-    /// Minibuffer-local keymap: overrides the global keymap while the
-    /// minibuffer is active (Emacs's minibuffer-local-map).
-    minibuffer_keymap: Keymap,
     /// Accepted minibuffer inputs, for C-n/C-p history recall.
     minibuffer_history: Vec<String>,
     /// What a suspended command coroutine is waiting for.
@@ -75,6 +70,11 @@ pub struct Editor {
     minor_defs: std::collections::HashMap<String, MinorModeDef>,
     /// Which keymap the key sequence in progress belongs to.
     pending_keymap: Option<KeymapSource>,
+    /// An overriding keymap, checked before the normal maps by the
+    /// read-key loop of modes like isearch (Emacs's
+    /// `overriding-terminal-local-map`).  It is stored and queried through
+    /// `lookup_overriding_key`, separately from the normal dispatch.
+    overriding_keymap: Option<Keymap>,
     /// The most recent key delivered to a `read-key` coroutine, for replay.
     replay_key: Option<Key>,
     /// The (start, end) char offsets of the current isearch match, if the
@@ -95,7 +95,6 @@ impl Editor {
             echo: None,
             echo_error: false,
             minibuffer: None,
-            minibuffer_keymap: Keymap::new(),
             minibuffer_history: Vec::new(),
             pending: None,
             pending_keys: Vec::new(),
@@ -108,6 +107,7 @@ impl Editor {
             mode_defs: std::collections::HashMap::new(),
             minor_defs: std::collections::HashMap::new(),
             pending_keymap: None,
+            overriding_keymap: None,
             replay_key: None,
             search_match: None,
             replay: false,
@@ -132,25 +132,23 @@ impl Editor {
             .expect("buffer id exists")
     }
 
-    /// The buffer shown in the selected window.
-    /// The buffer that editing commands act on: the minibuffer input while
-    /// a read is in progress, otherwise the buffer shown in the selected
-    /// window (Emacs's model — the minibuffer is the current buffer during
-    /// a read).
-    pub fn buf(&self) -> &Buffer {
+    /// Index of the buffer editing commands act on: the minibuffer input
+    /// while a read is in progress (it is a real registered buffer), else
+    /// the buffer shown in the selected window (Emacs's model — the
+    /// minibuffer is the current buffer during a read).
+    pub fn current_buffer_index(&self) -> usize {
         if let Some(mb) = &self.minibuffer {
-            return mb.buffer();
+            return self.buffer_index(mb.buffer_id);
         }
-        let id = self.windows.selected_buffer();
-        &self.buffers[self.buffer_index(id)]
+        self.selected_buffer_index()
+    }
+
+    pub fn buf(&self) -> &Buffer {
+        &self.buffers[self.current_buffer_index()]
     }
 
     pub fn buf_mut(&mut self) -> &mut Buffer {
-        if self.minibuffer.is_some() {
-            return self.minibuffer.as_mut().expect("minibuffer").buffer_mut();
-        }
-        let id = self.windows.selected_buffer();
-        let idx = self.buffer_index(id);
+        let idx = self.current_buffer_index();
         &mut self.buffers[idx]
     }
 
@@ -158,9 +156,72 @@ impl Editor {
     /// while a read is in progress).
     pub fn current_buffer_id(&self) -> usize {
         if let Some(mb) = &self.minibuffer {
-            return mb.buffer().id;
+            return mb.buffer_id;
         }
         self.windows.selected_buffer()
+    }
+
+    /// The minibuffer input buffer, if a read is in progress.
+    pub fn minibuffer_buffer(&self) -> Option<&Buffer> {
+        self.minibuffer
+            .as_ref()
+            .map(|mb| &self.buffers[self.buffer_index(mb.buffer_id)])
+    }
+
+    /// The minibuffer state together with its input buffer, for editing.
+    pub fn minibuffer_and_buffer_mut(&mut self) -> Option<(&mut Minibuffer, &mut Buffer)> {
+        let mb = self.minibuffer.as_mut()?;
+        let idx = self.buffers.iter().position(|b| b.id == mb.buffer_id)?;
+        Some((mb, &mut self.buffers[idx]))
+    }
+
+    /// The minibuffer input text ("" when no read is active).
+    pub fn minibuffer_input(&self) -> String {
+        match self.minibuffer_buffer() {
+            Some(buf) => buf.rope().to_string(),
+            None => String::new(),
+        }
+    }
+
+    /// The text RET accepts: the input plus the completion preview.
+    pub fn minibuffer_accepted(&self) -> String {
+        match (&self.minibuffer, self.minibuffer_buffer()) {
+            (Some(mb), Some(buf)) => mb.accepted(buf),
+            _ => String::new(),
+        }
+    }
+
+    /// Display column of the minibuffer input cursor.
+    pub fn minibuffer_cursor_col(&self) -> usize {
+        match (&self.minibuffer, self.minibuffer_buffer()) {
+            (Some(mb), Some(buf)) => mb.cursor_col(buf),
+            _ => 0,
+        }
+    }
+
+    pub fn minibuffer_insert_char(&mut self, c: char) {
+        if let Some((mb, buf)) = self.minibuffer_and_buffer_mut() {
+            mb.insert_char(buf, c);
+        }
+    }
+
+    pub fn minibuffer_accept_preview(&mut self) {
+        if let Some((mb, buf)) = self.minibuffer_and_buffer_mut() {
+            mb.accept_preview(buf);
+        }
+    }
+
+    pub fn minibuffer_cycle(&mut self) -> bool {
+        match self.minibuffer_and_buffer_mut() {
+            Some((mb, buf)) => mb.cycle(buf),
+            None => false,
+        }
+    }
+
+    pub fn minibuffer_complete_with(&mut self, candidates: Vec<String>, fill: bool) {
+        if let Some((mb, buf)) = self.minibuffer_and_buffer_mut() {
+            mb.complete_with(buf, candidates, fill);
+        }
     }
 
     pub fn selected_buffer_id(&self) -> usize {
@@ -445,40 +506,12 @@ impl Editor {
         &mut self.keymap
     }
 
-    pub fn minibuffer_keymap_mut(&mut self) -> &mut Keymap {
-        &mut self.minibuffer_keymap
-    }
-
-    /// Look up a key sequence while the minibuffer is active: the
-    /// minibuffer-local keymap first, then the global keymap (Emacs's
-    /// minibuffer-local-map inherits the global map).
-    pub fn lookup_minibuffer_key(&mut self, seq: &[Key]) -> Lookup {
-        if seq.is_empty() {
-            return Lookup::Unbound;
-        }
-        if let Some(src) = self.pending_keymap {
-            let map = self.keymap_for_source(src);
-            return map.lookup(seq);
-        }
-        let sources = [KeymapSource::Minibuffer, KeymapSource::Global];
-        for src in sources {
-            let map = self.keymap_for_source(src);
-            match map.lookup(seq) {
-                Lookup::Unbound => continue,
-                Lookup::Prefix => {
-                    self.pending_keymap = Some(src);
-                    return Lookup::Prefix;
-                }
-                cmd => return cmd,
-            }
-        }
-        Lookup::Unbound
-    }
-
     /// Look up a key sequence against the active keymaps: enabled minor mode
-    /// keymaps (most recently enabled first), the buffer's local keymap,
-    /// then the global keymap. A prefix result fixes the source for the
-    /// rest of the sequence.
+    /// keymaps (most recently enabled first), the current buffer's local
+    /// keymap, then the global keymap.  The current buffer is the minibuffer
+    /// while a read is active, so its `minibuffer-mode` local keymap is
+    /// consulted then.  A prefix result fixes the source for the rest of the
+    /// sequence.
     pub fn lookup_key(&mut self, seq: &[Key]) -> Lookup {
         if seq.is_empty() {
             return Lookup::Unbound;
@@ -487,7 +520,7 @@ impl Editor {
             let map = self.keymap_for_source(src);
             return map.lookup(seq);
         }
-        let idx = self.selected_buffer_index();
+        let idx = self.current_buffer_index();
         let minor_sources: Vec<KeymapSource> = self.buffers[idx]
             .enabled_minor()
             .iter()
@@ -519,15 +552,35 @@ impl Editor {
         Lookup::Unbound
     }
 
+    /// Install the keymap a `read-key` loop consults before the normal
+    /// maps (Emacs's `overriding-terminal-local-map`; isearch uses it).
+    pub fn set_overriding_keymap(&mut self, keymap: Keymap) {
+        self.overriding_keymap = Some(keymap);
+    }
+
+    /// Remove the overriding keymap (the read-key loop finished).
+    pub fn clear_overriding_keymap(&mut self) {
+        self.overriding_keymap = None;
+    }
+
+    /// Look a sequence up in the overriding keymap only.  Unlike
+    /// `lookup_key`, this never touches the pending-prefix state: the
+    /// read-key loop that owns the override tracks its own keys.
+    pub fn lookup_overriding_key(&self, seq: &[Key]) -> Lookup {
+        match &self.overriding_keymap {
+            Some(map) if !seq.is_empty() => map.lookup(seq),
+            _ => Lookup::Unbound,
+        }
+    }
+
     fn keymap_for_source(&self, src: KeymapSource) -> &Keymap {
         match src {
             KeymapSource::Global => &self.keymap,
-            KeymapSource::Minibuffer => &self.minibuffer_keymap,
-            KeymapSource::Local => self.buffers[self.selected_buffer_index()]
+            KeymapSource::Local => self.buffers[self.current_buffer_index()]
                 .local_keymap()
                 .expect("local keymap exists"),
             KeymapSource::Minor(i) => {
-                let idx = self.selected_buffer_index();
+                let idx = self.current_buffer_index();
                 let name = self.buffers[idx]
                     .enabled_minor()
                     .iter()
@@ -557,7 +610,7 @@ impl Editor {
 
     /// (name, lighter, bindings) of every enabled minor mode with a keymap.
     pub fn minor_binding_sets(&self) -> Vec<MinorBindingSet> {
-        let idx = self.selected_buffer_index();
+        let idx = self.current_buffer_index();
         let mut out = Vec::new();
         for name in self.buffers[idx].enabled_minor().to_vec() {
             if let Some(def) = self.minor_defs.get(&name) {
@@ -671,10 +724,16 @@ impl Editor {
     /// Reinstall a saved minibuffer state (after a command ran while the
     /// minibuffer was active).
     pub fn restore_minibuffer(&mut self, mb: Minibuffer) {
+        let input = self
+            .buffers
+            .iter()
+            .find(|b| b.id == mb.buffer_id)
+            .map(|b| b.rope().to_string())
+            .unwrap_or_default();
         self.pending = Some(PendingRequest::ReadString {
             prompt: mb.prompt.clone(),
             completion: mb.completion,
-            initial: mb.input(),
+            initial: input,
         });
         self.minibuffer = Some(mb);
     }
@@ -682,21 +741,23 @@ impl Editor {
     /// C-n / C-p: step through the input history, recalling entries into
     /// the minibuffer input. Past the last entry the input is empty.
     pub fn minibuffer_history_step(&mut self, dir: isize) {
-        let Some(mb) = self.minibuffer.as_mut() else {
+        let Some(history_index) = self.minibuffer.as_ref().map(|mb| mb.history_index) else {
             return;
         };
         let len = self.minibuffer_history.len() as isize;
-        let idx = mb.history_index as isize + dir;
+        let idx = history_index as isize + dir;
         if !(0..=len).contains(&idx) {
             return;
         }
-        mb.history_index = idx as usize;
         let text = if (idx as usize) < self.minibuffer_history.len() {
             self.minibuffer_history[idx as usize].clone()
         } else {
             String::new()
         };
-        mb.set_input(&text);
+        if let Some((mb, buf)) = self.minibuffer_and_buffer_mut() {
+            mb.history_index = idx as usize;
+            mb.set_input(buf, &text);
+        }
     }
 
     pub fn pending(&self) -> Option<&PendingRequest> {
@@ -719,7 +780,7 @@ impl Editor {
     /// request (installing a fresh minibuffer for read-string requests).
     /// Returns a key to replay through the normal dispatch, if requested.
     pub fn finish_command(&mut self, outcome: CommandOutcome) -> Option<Key> {
-        self.minibuffer = None;
+        let previous = self.minibuffer.take();
         match outcome {
             CommandOutcome::Done => {
                 self.pending = None;
@@ -737,7 +798,26 @@ impl Editor {
                 completion,
                 initial,
             }) => {
-                let mut mb = Minibuffer::new(prompt.clone(), completion, Some(initial.clone()));
+                // A nested read replaces the outer minibuffer (if any).
+                if let Some(old) = previous {
+                    self.kill_buffer_at(old.buffer_id);
+                }
+                // The input is a real, registered buffer (Emacs's model):
+                // the minibuffer is the current buffer during the read.
+                let mut buf = Buffer::new(" *Minibuf*");
+                if !initial.is_empty() {
+                    buf.insert(&initial);
+                    buf.move_to_buffer_end();
+                    // the pre-filled input is not a user modification
+                    buf.set_modified(false);
+                }
+                let id = buf.id;
+                self.buffers.push(buf);
+                if self.mode_defs.contains_key("minibuffer-mode") {
+                    let idx = self.buffers.len() - 1;
+                    let _ = self.set_buffer_mode_by_name(idx, "minibuffer-mode");
+                }
+                let mut mb = Minibuffer::new(id, prompt.clone(), completion, Some(initial.clone()));
                 mb.history_index = self.minibuffer_history.len();
                 self.minibuffer = Some(mb);
                 self.pending = Some(PendingRequest::ReadString {
@@ -748,6 +828,9 @@ impl Editor {
                 None
             }
             CommandOutcome::Pending(p) => {
+                if let Some(old) = previous {
+                    self.kill_buffer_at(old.buffer_id);
+                }
                 self.pending = Some(p);
                 None
             }
@@ -809,14 +892,14 @@ impl Editor {
         out
     }
 
-    /// Resume a suspended command coroutine.
-    /// Resume a suspended command coroutine. The minibuffer is cleared
-    /// first: while the read was in progress the input was the current
-    /// buffer, but the command's continuation runs against the main
-    /// buffer (Emacs: `read-from-minibuffer` returns, then the caller
-    /// continues).
+    /// Resume a suspended command coroutine.  A pending minibuffer read is
+    /// finished first: its input buffer is killed and the continuation runs
+    /// against the main buffer (Emacs: `read-from-minibuffer` returns, then
+    /// the caller continues).
     pub fn resume_pending(&mut self, value: ResumeValue) -> Result<CommandOutcome> {
-        self.minibuffer = None;
+        if let Some(old) = self.minibuffer.take() {
+            self.kill_buffer_at(old.buffer_id);
+        }
         self.pending = None;
         let mut out = Err(anyhow!("no script host attached"));
         self.with_host(|ed, host| {
@@ -825,11 +908,11 @@ impl Editor {
         out
     }
 
-    /// C-g deactivates the mark of the buffer shown in the selected
-    /// window (quitting cancels the active region; the mark position is
-    /// kept, so C-x C-x can reactivate it).
+    /// C-g deactivates the mark of the current buffer (quitting cancels the
+    /// active region; the mark position is kept, so C-x C-x can reactivate
+    /// it).
     pub fn deactivate_mark(&mut self) {
-        let idx = self.selected_buffer_index();
+        let idx = self.current_buffer_index();
         self.buffers[idx].deactivate_mark();
     }
 
@@ -976,6 +1059,35 @@ mod tests {
     }
 
     #[test]
+    fn overriding_keymap_is_queried_separately() {
+        let mut ed = Editor::new(20, 80);
+        let mut km = Keymap::new();
+        km.bind_sequence(
+            &crate::key::parse_sequence("C-s").unwrap(),
+            "isearch-repeat-forward",
+        );
+        ed.set_overriding_keymap(km);
+        assert_eq!(
+            ed.lookup_overriding_key(&crate::key::parse_sequence("C-s").unwrap()),
+            Lookup::Command("isearch-repeat-forward".into())
+        );
+        assert_eq!(
+            ed.lookup_overriding_key(&crate::key::parse_sequence("C-n").unwrap()),
+            Lookup::Unbound
+        );
+        // normal lookup does not see the override
+        assert_eq!(
+            ed.lookup_key(&crate::key::parse_sequence("C-s").unwrap()),
+            Lookup::Unbound
+        );
+        ed.clear_overriding_keymap();
+        assert_eq!(
+            ed.lookup_overriding_key(&crate::key::parse_sequence("C-s").unwrap()),
+            Lookup::Unbound
+        );
+    }
+
+    #[test]
     fn local_keymap_overrides_global() {
         let mut ed = Editor::new(20, 80);
         ed.keymap_mut()
@@ -1089,20 +1201,20 @@ mod tests {
         }));
         // C-p recalls the most recent entry, then the one before it
         ed.minibuffer_history_step(-1);
-        assert_eq!(ed.minibuffer().unwrap().input(), "second");
+        assert_eq!(ed.minibuffer_input(), "second");
         ed.minibuffer_history_step(-1);
-        assert_eq!(ed.minibuffer().unwrap().input(), "first");
+        assert_eq!(ed.minibuffer_input(), "first");
         // at the oldest entry, C-p stops
         ed.minibuffer_history_step(-1);
-        assert_eq!(ed.minibuffer().unwrap().input(), "first");
+        assert_eq!(ed.minibuffer_input(), "first");
         // C-n walks forward, past the end the input is empty
         ed.minibuffer_history_step(1);
         ed.minibuffer_history_step(1);
-        assert_eq!(ed.minibuffer().unwrap().input(), "");
+        assert_eq!(ed.minibuffer_input(), "");
         // editing after recall inserts into the recalled text
         ed.minibuffer_history_step(-1);
-        ed.minibuffer_mut().unwrap().insert_char('!');
-        assert_eq!(ed.minibuffer().unwrap().input(), "second!");
+        ed.minibuffer_insert_char('!');
+        assert_eq!(ed.minibuffer_input(), "second!");
     }
 
     #[test]

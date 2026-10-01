@@ -79,14 +79,8 @@ for d = 1, 9 do
   bind("M-" .. d, "digit-argument-" .. d)
 end
 
--- The minibuffer keymap overrides the global map while the minibuffer is
--- active (Emacs's minibuffer-local-map). Only minibuffer-specific keys
--- live here; motion and editing keys fall through to the global map, so
--- the user's bindings operate on the minibuffer input, like Emacs.
-local function mbind(seq, cmd)
-  raw.bind_minibuffer(seq, cmd)
-end
-mbind("C-p", "minibuf-previous-history")
-mbind("C-n", "minibuf-next-history")
-mbind("<up>", "minibuf-previous-history")
-mbind("<down>", "minibuf-next-history")
+-- The minibuffer has its own major mode (`minibuffer-mode`, see modes.lua)
+-- whose buffer-local keymap overrides the global map while a read is
+-- active, just like Emacs's minibuffer-local-map. Commands that are not
+-- bound there fall through to the global map.
+

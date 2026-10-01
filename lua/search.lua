@@ -105,8 +105,10 @@ function isearch.step(restart)
   end
 end
 
--- The isearch keymap: key -> command name (single keys).  Rebind with
--- emacs.bind_isearch("C-p", "isearch-yank-kill").
+-- The isearch keymap: key -> command name (single keys).  It is installed
+-- in the core as an overriding keymap while a search is active (Emacs's
+-- `overriding-terminal-local-map'), and normal dispatch never sees it.
+-- Rebind with emacs.bind_isearch("C-p", "isearch-yank-kill").
 M.isearch_bindings = {
   ["C-s"] = "isearch-repeat-forward",
   ["C-r"] = "isearch-repeat-backward",
@@ -241,27 +243,34 @@ local function run(forward)
   s.forward = forward
   emacs.message(isearch.prompt())
 
-  while s.active do
-    local key = emacs.read_key()
-    local cmd = M.isearch_bindings[key]
-    if cmd then
-      M.run_command(cmd, key)
-    elseif is_printable(key) then
-      M.run_command("isearch-printing-char", key)
-    else
-      -- Keep honoring a `yank' rebinding from the normal keymaps, so a
-      -- custom yank key works in the search too; anything else ends the
-      -- search and runs normally.
-      local status, global_cmd = raw.lookup_key(key)
-      if status == "command" and global_cmd == "yank" then
-        M.run_command("isearch-yank-kill")
+  -- Consult the isearch keymap before anything else while the search is
+  -- active; unbound printable keys extend the query, anything else ends
+  -- the search and is replayed against the buffer.
+  raw.set_overriding_keymap(M.isearch_bindings)
+  local ok, err = pcall(function()
+    while s.active do
+      local key = emacs.read_key()
+      local status, cmd = raw.lookup_overriding_key(key)
+      if status == "command" then
+        M.run_command(cmd, key)
+      elseif is_printable(key) then
+        M.run_command("isearch-printing-char", key)
       else
-        raw.clear_search_match()
-        emacs.replay_key()
-        s.active = false
+        -- Keep honoring a `yank' rebinding from the normal keymaps, so a
+        -- custom yank key works in the search too.
+        local gstatus, global_cmd = raw.lookup_key(key)
+        if gstatus == "command" and global_cmd == "yank" then
+          M.run_command("isearch-yank-kill")
+        else
+          raw.clear_search_match()
+          emacs.replay_key()
+          s.active = false
+        end
       end
     end
-  end
+  end)
+  raw.clear_overriding_keymap()
+  if not ok then error(err) end
 end
 
 M.define("isearch-forward", function()
