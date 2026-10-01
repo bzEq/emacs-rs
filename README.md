@@ -118,7 +118,7 @@ auto-loaded: `dofile` them from `init.lua`.
 | `api.lua` | state, undo, kill ring, prefix args, command machinery, the `emacs` API |
 | `motion.lua` | motion commands |
 | `editing.lua` | editing commands, auto-indentation |
-| `search.lua` | incremental search |
+| `search.lua` | incremental search, its keymap and commands (`emacs.bind_isearch`) |
 | `windows.lua` | window commands |
 | `files.lua` | find/save/write/switch/kill-buffer, file completion |
 | `modes.lua` | built-in major and minor modes |
@@ -140,6 +140,11 @@ See the fully commented example in
 emacs.define_command("my-cmd", function(prefix) emacs.insert("x") end)
 emacs.bind("C-c x", "my-cmd")            -- global binding (overrides defaults)
 emacs.local_set_key("C-c y", "my-cmd")   -- binding local to the current buffer
+
+-- isearch keymap: keys read while C-s / C-r is active (single keys).
+-- Defaults: C-s/C-r repeat, C-y yank kill, C-w yank word, DEL delete
+-- char, C-g abort, RET exit.
+emacs.bind_isearch("C-p", "isearch-yank-kill")
 
 -- synchronous reads (coroutine-based)
 local name = emacs.read_string("Name: ", nil)

@@ -21,6 +21,32 @@ fn start_search(le: &mut LuaEd, forward: bool) {
     );
 }
 
+/// A LuaEd with a user init script loaded (bindings, definitions).
+fn with_init(script: &str) -> LuaEd {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let mut le = LuaEd::new();
+    let dir = std::env::temp_dir().join(format!("em-isearch-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("init.lua");
+    std::fs::write(&path, script).unwrap();
+    le.load(&path);
+    let _ = std::fs::remove_dir_all(&dir);
+    le
+}
+
+/// Copy "hello" from the start of the buffer into the kill ring and leave
+/// point at the start of "hello world hello".
+fn prime_kill(le: &mut LuaEd) {
+    le.ed.buf_mut().insert("hello world hello");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed.buf_mut().set_point(5);
+    le.run("kill-ring-save");
+    le.ed.buf_mut().move_to_buffer_start();
+}
+
 #[test]
 fn forward_search_moves_point() {
     let mut le = LuaEd::new();
@@ -183,22 +209,8 @@ fn ctrl_y_yanks_the_kill_into_the_query() {
 
 #[test]
 fn a_rebound_yank_key_yanks_into_the_query() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut le = LuaEd::new();
-    let dir = std::env::temp_dir().join(format!("em-isearch-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("init.lua");
-    std::fs::write(&path, "emacs.bind(\"C-p\", \"yank\")").unwrap();
-    le.load(&path);
-
-    le.ed.buf_mut().insert("hello world hello");
-    le.ed.buf_mut().move_to_buffer_start();
-    le.run("set-mark-command");
-    le.ed.buf_mut().set_point(5);
-    le.run("kill-ring-save");
-    le.ed.buf_mut().move_to_buffer_start();
+    let mut le = with_init("emacs.bind(\"C-p\", \"yank\")");
+    prime_kill(&mut le);
     start_search(&mut le, true);
     assert!(
         le.read_key(Key::ctrl('p')),
@@ -207,7 +219,31 @@ fn a_rebound_yank_key_yanks_into_the_query() {
     assert_eq!(le.point(), 0, "the kill was yanked into the query");
     assert_eq!(le.ed.search_match(), Some((0, 5)));
     le.read_key(Key::ctrl('g'));
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bind_isearch_keys_dispatch_through_the_isearch_keymap() {
+    let mut le = with_init("emacs.bind_isearch(\"C-p\", \"isearch-yank-kill\")");
+    prime_kill(&mut le);
+    start_search(&mut le, true);
+    assert!(
+        le.read_key(Key::ctrl('p')),
+        "the isearch keymap resolves C-p"
+    );
+    assert_eq!(le.ed.search_match(), Some((0, 5)));
+    le.read_key(Key::ctrl('g'));
+}
+
+#[test]
+fn isearch_keymap_overrides_the_global_yank_fallback() {
+    // Rebinding C-y in the isearch map must take precedence over the
+    // global `yank' binding.
+    let mut le = with_init("emacs.bind_isearch(\"C-y\", \"isearch-abort\")");
+    prime_kill(&mut le);
+    start_search(&mut le, true);
+    assert!(!le.read_key(Key::ctrl('y')), "C-y aborted the search");
+    assert_eq!(le.ed.echo(), Some("Quit"));
+    assert_eq!(le.point(), 0, "abort restored the original point");
 }
 
 #[test]

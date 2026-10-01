@@ -118,6 +118,7 @@ end)
 
 -- emacs.bind(seq, cmd)              global binding
 -- emacs.local_set_key(seq, cmd)     binding in the current buffer only
+-- emacs.bind_isearch(seq, cmd)      binding while isearch (C-s/C-r) is active
 -- emacs.define_command(name, fn)    new command (fn receives prefix arg)
 -- emacs.add_hook(name, fn)          hooks: before_save, after_save
 
