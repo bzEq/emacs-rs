@@ -55,6 +55,30 @@ fn save_writes_to_disk() {
 }
 
 #[test]
+fn new_file_opens_buffer_and_save_creates_it() {
+    // `em newfile.txt` with a missing file: the buffer opens anyway, and
+    // C-x C-s creates the file on disk.
+    let em = Em::spawn();
+    let target = em.scratch.join("newfile.txt");
+    let target_s = target.to_string_lossy().into_owned();
+    let mut em = Em::spawn_with_args(&[&target_s]);
+    assert!(
+        em.wait_for("newfile.txt", 5000),
+        "buffer for the missing file opens"
+    );
+    assert!(!target.exists(), "file not created yet");
+    em.type_str("hello new file");
+    em.keys(b"\x18\x13"); // C-x C-s
+    assert!(em.wait_for("Wrote", 3000), "save message");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "hello new file",
+        "the file now exists with the buffer content"
+    );
+    em.quit();
+}
+
+#[test]
 fn modified_quit_prompts() {
     let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "abc\n");

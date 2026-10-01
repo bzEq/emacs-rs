@@ -620,8 +620,21 @@ impl LuaHost {
         raw.set(
             "open_file",
             lua.create_function(|lua, path: String| {
-                let buf = emacs_core::buffer::Buffer::load_file(&path)
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+                // A missing file still opens a buffer: it gets the path
+                // (and the file is created on save, C-x C-s).
+                let buf = match emacs_core::buffer::Buffer::load_file(&path) {
+                    Ok(buf) => buf,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        let name = Path::new(&path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.clone());
+                        let mut buf = emacs_core::buffer::Buffer::new(name);
+                        buf.set_path(Some(PathBuf::from(&path)));
+                        buf
+                    }
+                    Err(e) => return Err(mlua::Error::RuntimeError(e.to_string())),
+                };
                 let ed = editor_ref(lua)?;
                 let id = buf.id;
                 ed.add_buffer(buf);
