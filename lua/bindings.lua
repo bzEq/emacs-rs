@@ -59,6 +59,7 @@ bind("C-x u", "undo")
 bind("C-x C-x", "exchange-point-and-mark")
 bind("C-x C-c", "save-buffers-kill-terminal")
 -- misc
+bind("C-z", "suspend-frame")
 bind("M-x", "execute-extended-command")
 bind("C-h k", "describe-key")
 bind("C-h b", "describe-bindings")

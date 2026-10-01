@@ -62,6 +62,9 @@ pub struct Editor {
     /// Esc acts as a Meta prefix (ESC x == M-x).
     esc_prefix: bool,
     quit: bool,
+    /// Set by `suspend-frame` (C-z): the event loop hands the terminal
+    /// back to the shell and suspends the process.
+    suspend: bool,
     /// Rows/cols of the buffer area (terminal size minus modeline + echo).
     window_rows: usize,
     window_cols: usize,
@@ -98,6 +101,7 @@ impl Editor {
             pending_keys: Vec::new(),
             esc_prefix: false,
             quit: false,
+            suspend: false,
             window_rows,
             window_cols,
             script: None,
@@ -601,6 +605,20 @@ impl Editor {
 
     pub fn set_quit(&mut self, q: bool) {
         self.quit = q;
+    }
+
+    /// `suspend-frame` (C-z): the event loop suspends the process and
+    /// hands the terminal back to the shell.
+    pub fn set_suspend(&mut self) {
+        self.suspend = true;
+    }
+
+    pub fn suspend_requested(&self) -> bool {
+        self.suspend
+    }
+
+    pub fn clear_suspend_request(&mut self) {
+        self.suspend = false;
     }
 
     // --- echo area ---------------------------------------------------------

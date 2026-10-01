@@ -9,6 +9,7 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -191,6 +192,48 @@ pub fn em_binary() -> PathBuf {
 impl Em {
     pub fn spawn() -> Self {
         Self::spawn_with_args(&[])
+    }
+
+    /// Spawn `em` as its own process-group leader inside the test's
+    /// session (what a shell foreground job looks like), for job-control
+    /// tests: C-z signals only the editor's group, and the group isn't
+    /// orphaned so SIGTSTP actually stops it.
+    pub fn spawn_job(scratch: PathBuf, args: &[&str]) -> Self {
+        let (master, slave) = openpty(24, 80);
+        let mut cmd = Command::new(em_binary());
+        cmd.args(args)
+            .env("XDG_CONFIG_HOME", scratch.join("cfg"))
+            .env("TERM", "xterm-256color");
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave))
+            .spawn()
+            .expect("failed to spawn em");
+        set_nonblocking(&master);
+        Em {
+            scratch,
+            screen: Screen::new(24, 80),
+            raw: Vec::new(),
+            fed: 0,
+            master,
+            child,
+            exited: None,
+            remove_scratch: false,
+        }
+    }
+
+    /// The child's pid (for sending signals).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Spawn `em` with the given arguments; `XDG_CONFIG_HOME` points at a

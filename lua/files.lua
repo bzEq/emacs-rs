@@ -196,6 +196,10 @@ M.define("kill-buffer", function()
   end
 end, "Kill a buffer.")
 
+M.define("suspend-frame", function()
+  raw.set_suspend()
+end, "Stop the editor and hand the terminal back to the shell; `fg` resumes it.")
+
 M.define("save-buffers-kill-terminal", function()
   local modified = {}
   for _, id in ipairs(raw.buffer_ids()) do

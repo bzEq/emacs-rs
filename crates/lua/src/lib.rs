@@ -936,6 +936,13 @@ impl LuaHost {
             })?,
         )?;
         raw.set(
+            "set_suspend",
+            lua.create_function(|lua, ()| {
+                editor_ref(lua)?.set_suspend();
+                Ok(())
+            })?,
+        )?;
+        raw.set(
             "replay_key",
             lua.create_function(|lua, ()| {
                 editor_ref(lua)?.set_replay();

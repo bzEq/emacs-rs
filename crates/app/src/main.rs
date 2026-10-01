@@ -10,6 +10,7 @@ use std::panic;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -156,6 +157,25 @@ fn init_file() -> Option<PathBuf> {
     Some(dir.join("emacs-rs").join("init.lua"))
 }
 
+/// C-z (`suspend-frame`): hand the terminal back to the shell and stop
+/// the process (job control resumes it via `fg`). The terminal is
+/// restored before stopping and re-taken with a full redraw after.
+fn suspend_frame(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, Show)?;
+    // Stop our process group: SIGTSTP (the shell's `fg` sends SIGCONT).
+    // Fails (EINTR-less EPERM) if job control isn't available; the editor
+    // then just keeps running.
+    unsafe {
+        libc::kill(0, libc::SIGTSTP);
+    }
+    // Resumed: take the terminal back and redraw everything.
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+    terminal.clear()?;
+    Ok(())
+}
+
 fn run(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     // Watch buffer files with inotify (global-auto-revert-mode): events
     // arrive on `fw`'s channel and are drained each loop iteration.
@@ -174,6 +194,10 @@ fn run(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
         })?;
         if ed.quit() {
             return Ok(());
+        }
+        if ed.suspend_requested() {
+            ed.clear_suspend_request();
+            suspend_frame(terminal)?;
         }
         if event::poll(DRAIN)? {
             match event::read()? {
