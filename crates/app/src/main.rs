@@ -361,20 +361,14 @@ fn update_completion(ed: &mut Editor, fill: bool) {
     if !has_completion {
         return;
     }
-    let input = ed
-        .minibuffer()
-        .map(|mb| mb.input.clone())
-        .unwrap_or_default();
+    let input = ed.minibuffer().map(|mb| mb.input()).unwrap_or_default();
     let candidates = ed.update_completion(&input).unwrap_or_default();
     if let Some(mb) = ed.minibuffer_mut() {
         mb.complete_with(candidates, fill);
     }
     // recompute against the (possibly extended) input so the displayed
     // candidates always match what is in the minibuffer
-    let input = ed
-        .minibuffer()
-        .map(|mb| mb.input.clone())
-        .unwrap_or_default();
+    let input = ed.minibuffer().map(|mb| mb.input()).unwrap_or_default();
     let candidates = ed.update_completion(&input).unwrap_or_default();
     if let Some(mb) = ed.minibuffer_mut() {
         mb.candidates = candidates;
@@ -446,7 +440,7 @@ fn minibuffer_key(ed: &mut Editor, key: Key) -> Result<()> {
                     // previous set instead
                     if mb.candidates.len() < 2 && prev_cands.len() >= 2 {
                         mb.candidates = prev_cands;
-                        let pos = mb.candidates.iter().position(|c| *c == mb.input);
+                        let pos = mb.candidates.iter().position(|c| *c == mb.input());
                         mb.cycle = match pos {
                             Some(i) => i, // cycle() advances to the next
                             None => usize::MAX,

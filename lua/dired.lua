@@ -68,7 +68,9 @@ function dired.open(dir, other_window)
 end
 
 function dired.refresh()
-  local id = raw.id()
+  -- the dired buffer may differ from the current buffer (a command's
+  -- continuation after a prompt), so resolve it through the window
+  local id = raw.selected_buffer_id()
   local d = M.dired[id]
   if not d then
     error("not a dired buffer")
@@ -89,7 +91,7 @@ function dired.refresh()
         .. (e.is_dir and "/" or "") .. "\n"
   end
   d.entries = entries
-  raw.replace_buffer_content(text)
+  raw.replace_buffer_content(id, text)
 end
 
 local function entry_at_point()

@@ -58,6 +58,30 @@ pub struct Buffer {
     syntax_last_parse: Option<std::time::Instant>,
 }
 
+/// A cloned buffer shares its text but starts with no syntax tree (used
+/// to save/restore the minibuffer state across a nested command).
+impl Clone for Buffer {
+    fn clone(&self) -> Self {
+        Buffer {
+            id: self.id,
+            name: self.name.clone(),
+            path: self.path.clone(),
+            rope: self.rope.clone(),
+            point: self.point,
+            goal_column: self.goal_column,
+            modified: self.modified,
+            mark: self.mark,
+            read_only: self.read_only,
+            mode: self.mode.clone(),
+            local_keymap: self.local_keymap.clone(),
+            enabled_minor: self.enabled_minor.clone(),
+            syntax: None,
+            syntax_dirty: self.syntax_dirty,
+            syntax_last_parse: None,
+        }
+    }
+}
+
 impl Buffer {
     pub fn new(name: impl Into<String>) -> Self {
         Buffer {

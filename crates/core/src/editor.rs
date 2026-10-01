@@ -125,15 +125,34 @@ impl Editor {
     }
 
     /// The buffer shown in the selected window.
+    /// The buffer that editing commands act on: the minibuffer input while
+    /// a read is in progress, otherwise the buffer shown in the selected
+    /// window (Emacs's model — the minibuffer is the current buffer during
+    /// a read).
     pub fn buf(&self) -> &Buffer {
+        if let Some(mb) = &self.minibuffer {
+            return mb.buffer();
+        }
         let id = self.windows.selected_buffer();
         &self.buffers[self.buffer_index(id)]
     }
 
     pub fn buf_mut(&mut self) -> &mut Buffer {
+        if self.minibuffer.is_some() {
+            return self.minibuffer.as_mut().expect("minibuffer").buffer_mut();
+        }
         let id = self.windows.selected_buffer();
         let idx = self.buffer_index(id);
         &mut self.buffers[idx]
+    }
+
+    /// Id of the buffer that editing commands act on (the minibuffer input
+    /// while a read is in progress).
+    pub fn current_buffer_id(&self) -> usize {
+        if let Some(mb) = &self.minibuffer {
+            return mb.buffer().id;
+        }
+        self.windows.selected_buffer()
     }
 
     pub fn selected_buffer_id(&self) -> usize {
@@ -217,15 +236,19 @@ impl Editor {
     /// Replace the current buffer's content with `text` (used by dired
     /// listings and the *Help* buffer), leaving point at the start and the
     /// buffer unmodified.
-    pub fn replace_buffer_content(&mut self, text: &str) {
-        let len = self.buf().rope().len_chars();
+    /// Replace the content of the buffer with `id` (used by dired listings
+    /// and the *Help* buffer), leaving point at the start and the buffer
+    /// unmodified.
+    pub fn replace_buffer_content(&mut self, id: usize, text: &str) {
+        let idx = self.buffer_index(id);
+        let len = self.buffers[idx].rope().len_chars();
         if len > 0 {
-            let _ = self.buf_mut().delete_range(0, len);
+            let _ = self.buffers[idx].delete_range(0, len);
         }
-        self.buf_mut().set_point(0);
-        self.buf_mut().insert(text);
-        self.buf_mut().set_point(0);
-        self.buf_mut().set_modified(false);
+        self.buffers[idx].set_point(0);
+        self.buffers[idx].insert(text);
+        self.buffers[idx].set_point(0);
+        self.buffers[idx].set_modified(false);
     }
 
     // --- windows -----------------------------------------------------------
@@ -616,7 +639,7 @@ impl Editor {
         self.pending = Some(PendingRequest::ReadString {
             prompt: mb.prompt.clone(),
             completion: mb.completion,
-            initial: mb.input.clone(),
+            initial: mb.input(),
         });
         self.minibuffer = Some(mb);
     }
@@ -633,14 +656,12 @@ impl Editor {
             return;
         }
         mb.history_index = idx as usize;
-        mb.input = if (idx as usize) < self.minibuffer_history.len() {
+        let text = if (idx as usize) < self.minibuffer_history.len() {
             self.minibuffer_history[idx as usize].clone()
         } else {
             String::new()
         };
-        mb.cursor = mb.input.len();
-        mb.preview.clear();
-        mb.candidates.clear();
+        mb.set_input(&text);
     }
 
     pub fn pending(&self) -> Option<&PendingRequest> {
@@ -764,7 +785,14 @@ impl Editor {
     }
 
     /// Resume a suspended command coroutine.
+    /// Resume a suspended command coroutine. The minibuffer is cleared
+    /// first: while the read was in progress the input was the current
+    /// buffer, but the command's continuation runs against the main
+    /// buffer (Emacs: `read-from-minibuffer` returns, then the caller
+    /// continues).
     pub fn resume_pending(&mut self, value: ResumeValue) -> Result<CommandOutcome> {
+        self.minibuffer = None;
+        self.pending = None;
         let mut out = Err(anyhow!("no script host attached"));
         self.with_host(|ed, host| {
             out = host.resume_pending(value, ed);
@@ -1017,20 +1045,20 @@ mod tests {
         }));
         // C-p recalls the most recent entry, then the one before it
         ed.minibuffer_history_step(-1);
-        assert_eq!(ed.minibuffer().unwrap().input, "second");
+        assert_eq!(ed.minibuffer().unwrap().input(), "second");
         ed.minibuffer_history_step(-1);
-        assert_eq!(ed.minibuffer().unwrap().input, "first");
+        assert_eq!(ed.minibuffer().unwrap().input(), "first");
         // at the oldest entry, C-p stops
         ed.minibuffer_history_step(-1);
-        assert_eq!(ed.minibuffer().unwrap().input, "first");
+        assert_eq!(ed.minibuffer().unwrap().input(), "first");
         // C-n walks forward, past the end the input is empty
         ed.minibuffer_history_step(1);
         ed.minibuffer_history_step(1);
-        assert_eq!(ed.minibuffer().unwrap().input, "");
+        assert_eq!(ed.minibuffer().unwrap().input(), "");
         // editing after recall inserts into the recalled text
         ed.minibuffer_history_step(-1);
         ed.minibuffer_mut().unwrap().insert_char('!');
-        assert_eq!(ed.minibuffer().unwrap().input, "second!");
+        assert_eq!(ed.minibuffer().unwrap().input(), "second!");
     }
 
     #[test]

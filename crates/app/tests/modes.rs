@@ -75,13 +75,14 @@ fn global_bindings_work_inside_the_minibuffer() {
     let (mut em, _) = spawn_with_config(INIT, "plain\n");
     assert!(em.wait_for("plain", 5000));
     // open find-file; while the minibuffer is active, a global binding
-    // (C-c t -> insert-timestamp) still runs, and the minibuffer stays
+    // (C-c t -> insert-timestamp) runs on the minibuffer input (the
+    // current buffer during a read, like Emacs), and the read stays
     em.keys(b"\x18\x06"); // C-x C-f
     assert!(em.wait_for("Find file:", 4000), "minibuffer prompt opened");
     em.keys(b"\x03t"); // C-c t
     assert!(
-        em.wait_for_row(0, "T1plain", 3000),
-        "global binding ran while the minibuffer was active"
+        em.wait_for_row(23, "T1", 3000),
+        "global binding ran on the minibuffer input"
     );
     assert!(
         em.wait_for_row(23, "Find file:", 3000),
@@ -89,6 +90,35 @@ fn global_bindings_work_inside_the_minibuffer() {
     );
     em.keys(b"\x07"); // C-g aborts the minibuffer
     assert!(em.wait_for("Quit", 3000));
+    em.quit();
+}
+
+#[test]
+fn minibuffer_follows_global_rebindings() {
+    // the user rebinds C-f to forward-word; in the minibuffer the same
+    // binding must apply to the minibuffer input (Emacs behavior)
+    let init = "emacs.bind(\"C-f\", \"forward-word\")\n";
+    let (mut em, _) = spawn_with_config(init, "plain\n");
+    assert!(em.wait_for("plain", 5000));
+    em.keys(b"\x18\x06"); // C-x C-f
+    assert!(em.wait_for("Find file:", 4000), "minibuffer prompt opened");
+    em.keys(b"\x01\x0b"); // C-a C-k: clear the pre-filled directory input
+    em.type_str("hello world");
+    assert!(em.wait_for_row(23, "hello world", 3000), "input typed");
+    em.keys(b"\x01"); // C-a -> point at the start of the input
+    em.keys(b"\x06"); // C-f -> the user's forward-word (moves past "hello")
+    em.keys(b"\x04"); // C-d -> deletes the space after "hello"
+    assert!(
+        em.wait_for_row(23, "helloworld", 3000),
+        "C-f followed the global rebinding (word motion, not char motion)"
+    );
+    assert!(
+        !em.screen.row_text(23).contains("hello world"),
+        "the space was deleted: point really moved a whole word"
+    );
+    // the main buffer is untouched by minibuffer commands
+    assert!(em.screen.row_text(0).starts_with("plain"));
+    em.keys(b"\x07");
     em.quit();
 }
 

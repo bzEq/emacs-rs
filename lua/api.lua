@@ -247,35 +247,10 @@ function M.run_hook(name)
   end
 end
 
--- ---- minibuffer editing commands (bound in the minibuffer keymap) ----------
-
-M.define("minibuf-backward-delete-char", function()
-  raw.mb_delete_backward()
-end)
-
-M.define("minibuf-delete-char", function()
-  raw.mb_delete_forward()
-end)
-
-M.define("minibuf-backward-char", function()
-  raw.mb_move_left()
-end)
-
-M.define("minibuf-forward-char", function()
-  raw.mb_move_right()
-end)
-
-M.define("minibuf-beginning-of-line", function()
-  raw.mb_to_start()
-end)
-
-M.define("minibuf-end-of-line", function()
-  raw.mb_to_end()
-end)
-
-M.define("minibuf-kill-line", function()
-  raw.mb_kill_line()
-end)
+-- ---- minibuffer history commands (bound in the minibuffer keymap) --------
+-- Motion and editing keys are NOT bound here: the minibuffer input is the
+-- current buffer while a read is active, so the global keymap's commands
+-- (including user rebindings) operate on it, like Emacs.
 
 M.define("minibuf-previous-history", function()
   raw.mb_history_step(-1)
@@ -376,7 +351,7 @@ end
 M.safe_read_dir = safe_read_dir
 
 function M.default_directory()
-  local d = M.dired[raw.id()]
+  local d = M.dired[raw.selected_buffer_id()]
   if d then return d.dir end
   local p = raw.path()
   if p then

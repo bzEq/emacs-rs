@@ -493,24 +493,34 @@ impl LuaHost {
         )?;
         raw.set(
             "name",
-            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf().name().to_string()))?,
+            lua.create_function(|lua, ()| {
+                let ed = editor_ref(lua)?;
+                Ok(ed.buffers()[ed.selected_buffer_index()].name().to_string())
+            })?,
         )?;
         raw.set(
             "path",
             lua.create_function(|lua, ()| {
-                Ok(editor_ref(lua)?
-                    .buf()
+                let ed = editor_ref(lua)?;
+                Ok(ed.buffers()[ed.selected_buffer_index()]
                     .path()
                     .map(|p| p.display().to_string()))
             })?,
         )?;
         raw.set(
             "id",
+            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.current_buffer_id()))?,
+        )?;
+        raw.set(
+            "selected_buffer_id",
             lua.create_function(|lua, ()| Ok(editor_ref(lua)?.selected_buffer_id()))?,
         )?;
         raw.set(
             "mode",
-            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf().mode().name.clone()))?,
+            lua.create_function(|lua, ()| {
+                let ed = editor_ref(lua)?;
+                Ok(ed.buffers()[ed.selected_buffer_index()].mode().name.clone())
+            })?,
         )?;
         raw.set(
             "in_comment_or_string",
@@ -628,8 +638,8 @@ impl LuaHost {
         )?;
         raw.set(
             "replace_buffer_content",
-            lua.create_function(|lua, text: String| {
-                editor_ref(lua)?.replace_buffer_content(&text);
+            lua.create_function(|lua, (id, text): (usize, String)| {
+                editor_ref(lua)?.replace_buffer_content(id, &text);
                 Ok(())
             })?,
         )?;
@@ -867,69 +877,6 @@ impl LuaHost {
         )?;
 
         // -- minibuffer input editing ---------------------------------------
-        raw.set(
-            "mb_delete_backward",
-            lua.create_function(|lua, ()| {
-                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
-                    mb.delete_backward();
-                }
-                Ok(())
-            })?,
-        )?;
-        raw.set(
-            "mb_delete_forward",
-            lua.create_function(|lua, ()| {
-                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
-                    mb.delete_forward();
-                }
-                Ok(())
-            })?,
-        )?;
-        raw.set(
-            "mb_move_left",
-            lua.create_function(|lua, ()| {
-                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
-                    mb.move_left();
-                }
-                Ok(())
-            })?,
-        )?;
-        raw.set(
-            "mb_move_right",
-            lua.create_function(|lua, ()| {
-                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
-                    mb.move_right();
-                }
-                Ok(())
-            })?,
-        )?;
-        raw.set(
-            "mb_to_start",
-            lua.create_function(|lua, ()| {
-                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
-                    mb.to_start();
-                }
-                Ok(())
-            })?,
-        )?;
-        raw.set(
-            "mb_to_end",
-            lua.create_function(|lua, ()| {
-                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
-                    mb.to_end();
-                }
-                Ok(())
-            })?,
-        )?;
-        raw.set(
-            "mb_kill_line",
-            lua.create_function(|lua, ()| {
-                if let Some(mb) = editor_ref(lua)?.minibuffer_mut() {
-                    mb.kill_line();
-                }
-                Ok(())
-            })?,
-        )?;
         raw.set(
             "mb_history_step",
             lua.create_function(|lua, dir: i64| {

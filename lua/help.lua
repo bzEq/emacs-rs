@@ -54,5 +54,5 @@ M.define("describe-bindings", function()
   end
   raw.select_buffer(help_id)
   raw.set_buffer_read_only(help_id, true)
-  raw.replace_buffer_content(text)
+  raw.replace_buffer_content(help_id, text)
 end, "List all key bindings.")
