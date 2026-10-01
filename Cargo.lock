@@ -336,7 +336,6 @@ dependencies = [
  "emacs-lua",
  "emacs-ui",
  "libc",
- "notify",
  "ratatui",
 ]
 
@@ -347,6 +346,7 @@ dependencies = [
  "anyhow",
  "bitflags 2.13.1",
  "memchr",
+ "notify",
  "ropey",
 ]
 

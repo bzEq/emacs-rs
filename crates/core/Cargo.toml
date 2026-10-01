@@ -8,6 +8,7 @@ license.workspace = true
 ropey.workspace = true
 anyhow.workspace = true
 bitflags.workspace = true
+notify.workspace = true
 memchr = "2"
 
 [dev-dependencies]

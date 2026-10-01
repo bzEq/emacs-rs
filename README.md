@@ -45,6 +45,62 @@ what modes do, how undo and the kill ring behave — lives in the `lua/`
 directory, so users can redefine any part of the editor from their
 `init.lua`.
 
+### Crates
+
+| Crate | Role |
+|---|---|
+| `emacs-core` | The minimal Rust core: text/window/key/mode/input *mechanisms* plus file watching, with no scripting dependency |
+| `emacs-lua` | LuaJIT host: exposes the core primitives as the `raw` API, embeds the `lua/` runtime, drives commands as coroutines |
+| `emacs-ui` | Rendering: turns `Editor` state into the ratatui screen (window tree, modeline, echo area / minibuffer) |
+| `emacs-app` (`em`) | Entry point, terminal setup, the event loop, and the terminal key adapter (`to_key`); owns the `FileWatcher` instance and renders via `emacs-ui` |
+
+### Core components (`crates/core`)
+
+| Component | Role | Deliberately not |
+|---|---|---|
+| `buffer.rs` | The single concrete `Buffer`: rope text + point/mark/goal column + name/path/modified/read-only + major mode, local keymap, minor modes; motion/editing/line queries/file IO | Undo, kill ring, command policy |
+| `editor.rs` | The core coordinator and world state: `buffers`, window tree, global/overriding keymaps, minibuffer state and history, echo, pending request/keys, mode registries, script host, current-buffer resolution, applying command outcomes | Concrete command semantics |
+| `input.rs` | The keyboard/command loop (`keyboard.c`-lite): routes one key into a pending read request or keymap dispatch, with replay/error handling and minibuffer completion upkeep | What commands do |
+| `key.rs` | Terminal-independent key model (`Key`/`KeyCode`/`Modifiers`) and Emacs-style sequence parsing/display | Bindings and dispatch |
+| `keymap.rs` | Sparse prefix keymap; `lookup → Command/Prefix/Unbound`; `flatten` for describe-bindings | What is bound to what (Lua decides) |
+| `mode.rs` / `minor.rs` | Mode *definitions* (name + keymap; the active major mode also carries its `Mode`) | Indentation, completion, mode behavior (in Lua) |
+| `minibuffer.rs` | State around the input line: prompt, completion flag, candidates, preview/cycle, history index, `buffer_id`; edits take a `&mut Buffer` | The input text itself (it is a real registered `Buffer`) |
+| `script.rs` | Dependency inversion: the `ScriptHost` trait plus `CommandOutcome`/`PendingRequest`/`ResumeValue`; the core knows nothing about Lua | Lua details |
+| `window.rs` | Window tree: leaves display buffer ids, interior nodes split; select/split/delete/cycle, layout, dividers | Scrolling and wrapping math |
+| `view.rs` | Per-window scroll state (first visible visual row) with caches for O(delta) row math | Text storage |
+| `wrap.rs` | Visual word-wrap shared by scrolling and rendering, plus a row walker so they agree on line breaks | Drawing |
+| `search.rs` | Rope search primitives used by isearch (case-insensitive substring, forward/backward), with an ASCII fast path | isearch interaction (in Lua) |
+| `watch.rs` | File watching (inotify via `notify`): maps buffer files to their parent dirs and reports the buffers whose files changed | Revert policy (in Lua) |
+
+### Design principles
+
+1. **Mechanism vs. policy**: Rust provides primitives (rope editing,
+   window tree, scrolling/wrapping, key parsing, keymap lookup, the event
+   loop, the script bridge, rendering); commands, undo, the kill ring,
+   isearch, dired, completion and mode behavior live in `lua/`.
+2. **Commands are Lua coroutines**: a command that needs input yields a
+   `PendingRequest`; the core resumes it when the input arrives, so Lua
+   code reads synchronously (`emacs.read_string/read_yes_no/read_key`).
+3. **Current-buffer model (Emacs's)**: during a minibuffer read the
+   minibuffer is a real registered `Buffer` (with `minibuffer-mode` and a
+   buffer-local keymap) and `buf()/buf_mut()` point at it; it is killed
+   when the read finishes.
+4. **Key lookup layering**: minor modes (most recently enabled first) →
+   buffer-local (major mode) → global; isearch uses a core-level
+   *overriding* keymap (Emacs's `overriding-terminal-local-map`), isolated
+   from normal dispatch.
+5. **One concrete `Buffer` type**: no trait hierarchy; unibyte/binary
+   storage, buffer-local variables and text properties/overlays are out of
+   scope for a plain-text editor.
+6. **Optional features are Lua extensions**: e.g.
+   `extensions/clang-format.lua`.
+
+A keypress flows as: `app` event loop → `to_key` (terminal adapter) →
+`core::input::handle_key` → (a pending read? route to its protocol) →
+otherwise `Editor::lookup_key` → `ScriptHost` starts or resumes the
+command coroutine → `PendingRequest` (suspend) or `Done` (possibly with a
+replay key) → `emacs-ui` renders the next frame from the `Editor` state.
+
 ## Features
 
 - **Rope buffer**: `ropey`-backed with O(log n) edits; a 100MB log file

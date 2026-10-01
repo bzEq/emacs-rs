@@ -12,6 +12,7 @@ ratatui = "0.30"
 crossterm = "0.29"
 anyhow = "1"
 bitflags = "2"
+notify = "8"
 
 [profile.release]
 lto = "thin"

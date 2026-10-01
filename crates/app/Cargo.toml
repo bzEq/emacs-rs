@@ -15,7 +15,6 @@ emacs-lua = { path = "../lua" }
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true
-notify = "8"
 libc = "0.2"
 
 [dev-dependencies]

@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod editor;
+pub mod input;
 pub mod key;
 pub mod keymap;
 pub mod minibuffer;
@@ -8,5 +9,6 @@ pub mod mode;
 pub mod script;
 pub mod search;
 pub mod view;
+pub mod watch;
 pub mod window;
 pub mod wrap;
