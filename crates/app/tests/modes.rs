@@ -139,6 +139,32 @@ fn quit_from_the_minibuffer() {
 }
 
 #[test]
+fn nested_read_from_the_minibuffer_is_refused() {
+    // A command run from the minibuffer that starts its own read must be
+    // refused (Emacs: `enable-recursive-minibuffers' nil), leaving the
+    // outer prompt intact.
+    let init = r#"
+emacs.define_command("ask", function()
+  local s = emacs.read_string("Ask: ", nil)
+  if s then emacs.insert(s) end
+end)
+emacs.bind("C-c r", "ask")
+"#;
+    let (mut em, _) = spawn_with_config(init, "plain\n");
+    assert!(em.wait_for("plain", 5000));
+    em.keys(b"\x1bx"); // M-x
+    assert!(em.wait_for("M-x ", 3000), "minibuffer opened");
+    em.keys(b"\x03r"); // C-c r: the command wants its own read
+    assert!(
+        em.wait_for_row(23, "M-x ", 3000),
+        "the outer minibuffer survives"
+    );
+    em.keys(b"\x07"); // C-g
+    assert!(em.wait_for("Quit", 3000));
+    em.quit();
+}
+
+#[test]
 fn line_numbers_gutter() {
     let em = Em::spawn();
     let path = write_file(&em.scratch, "t.txt", "one\ntwo\n");

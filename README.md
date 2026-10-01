@@ -120,7 +120,9 @@ replay key) → `emacs-ui` renders the next frame from the `Editor` state.
     binds, and everything else falls through, so user bindings keep
     working while the minibuffer is active (`C-x C-c` quits from there,
     custom keys run normally). Redefine `minibuffer-mode` from init.lua
-    to change its bindings.
+    to change its bindings. A command that tries to start a nested read
+    is refused (`Command attempted to use minibuffer while in
+    minibuffer`), matching Emacs with `enable-recursive-minibuffers` nil.
   - Incremental search: `C-s` / `C-r`, case-insensitive, wraps around,
     `C-g` aborts; the search keys are dispatched through an overriding
     keymap (`M.isearch_bindings`, Emacs's `overriding-terminal-local-map`)

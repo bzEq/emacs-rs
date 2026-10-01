@@ -171,6 +171,28 @@ fn consecutive_reads_suspend_between() {
 }
 
 #[test]
+fn nested_read_is_refused() {
+    let mut le = with_init();
+    le.command_reading("two-reads");
+    // A command run from the minibuffer (as minibuffer_key does) must not
+    // start a read of its own: Emacs's `enable-recursive-minibuffers' is
+    // nil by default.
+    let err = le
+        .ed
+        .call_command("two-reads", None)
+        .expect_err("nested read refused");
+    assert!(
+        err.to_string()
+            .contains("Command attempted to use minibuffer while in minibuffer"),
+        "unexpected error: {err}"
+    );
+    // The outer read is intact and continues into its second prompt.
+    assert!(le.answer("a"), "the outer read keeps its state");
+    assert!(!le.answer("b"));
+    assert_eq!(le.text(), "a,b");
+}
+
+#[test]
 fn nested_execute_runs_inline() {
     let mut le = with_init();
     le.run("nested-execute");

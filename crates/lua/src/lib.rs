@@ -236,6 +236,15 @@ impl LuaHost {
             Ok((outcome, completion, thread))
         })?;
         if matches!(outcome, CommandOutcome::Pending(_)) {
+            // Emacs with `enable-recursive-minibuffers' nil: a command run
+            // while a read is active may not start a read of its own.
+            // Refuse before overwriting the outer pending thread, so the
+            // active read (and its minibuffer input) survives intact.
+            if self.pending.is_some() {
+                return Err(anyhow!(
+                    "Command attempted to use minibuffer while in minibuffer"
+                ));
+            }
             self.pending = Some(PendingThread { thread, completion });
         }
         Ok(outcome)
