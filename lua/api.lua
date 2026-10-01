@@ -117,12 +117,19 @@ local function is_kill_command(name)
       or name == "kill-word" or name == "backward-kill-word"
 end
 
-function M.kill(text)
+-- Add TEXT to the kill ring.  When the previous command was a kill
+-- command, append to (or, with BEFORE, prepend to) the latest entry,
+-- like Emacs `kill-append'; otherwise push a new entry.
+function M.kill(text, before)
   if text == nil or text == "" then return end
   local append = is_kill_command(M.last_command)
   local kr = M.kill_ring
   if append and kr.entries[kr.current] then
-    kr.entries[kr.current] = kr.entries[kr.current] .. text
+    if before then
+      kr.entries[kr.current] = text .. kr.entries[kr.current]
+    else
+      kr.entries[kr.current] = kr.entries[kr.current] .. text
+    end
   else
     kr.entries[#kr.entries + 1] = text
     if #kr.entries > 60 then
@@ -143,8 +150,8 @@ function M.kill_ring_pop()
   return kr.entries[kr.current]
 end
 
-function emacs.kill(text)
-  M.kill(text)
+function emacs.kill(text, before)
+  M.kill(text, before)
 end
 
 function emacs.yank()

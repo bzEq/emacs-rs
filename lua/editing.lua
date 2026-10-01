@@ -194,17 +194,41 @@ M.define("kill-region", function()
   if not s then
     error("The mark is not set now, so there is no region")
   end
-  M.kill(emacs.delete_range(s, e))
+  -- Emacs kill-append: a backward region (point before mark) prepends to
+  -- the previous kill instead of appending.
+  local before = raw.point() < raw.mark()
+  M.kill(emacs.delete_range(s, e), before)
   raw.deactivate_mark()
 end, "Kill the text between point and mark.")
+
+-- Emacs `query-replace-descr': make control characters visible.
+local function describe_text(text)
+  text = text:gsub("\r", "^M")
+  text = text:gsub("\n", "^J")
+  text = text:gsub("\t", "^I")
+  return text
+end
+
+-- Emacs `indicate-copied-region': echo a sample of the copied text, taken
+-- from the end of the region when it was selected backwards (point before
+-- mark), from its start otherwise.
+local function indicate_copied_region(text, before)
+  local sample = before and text:sub(-40) or text:sub(1, 40)
+  local side = before and "until" or "from"
+  emacs.message("Copied text " .. side .. " \"" .. describe_text(sample) .. "\"")
+end
 
 M.define("kill-ring-save", function()
   local s, e = raw.region()
   if not s then
     error("The mark is not set now, so there is no region")
   end
-  M.kill(raw.get_text(s, e))
-end, "Copy the region to the kill ring.")
+  local before = raw.point() < raw.mark()
+  local text = raw.get_text(s, e)
+  M.kill(text, before)
+  raw.deactivate_mark()
+  indicate_copied_region(text, before)
+end, "Save the region as if killed, but don't kill it.")
 
 M.define("yank", function(prefix)
   local t = M.current_kill()

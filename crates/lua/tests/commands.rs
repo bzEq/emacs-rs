@@ -317,3 +317,83 @@ fn kill_region_deactivates_the_mark() {
     assert_eq!(le.ed.buf().region(), None, "kill-region deactivates");
     assert_eq!(le.text(), "");
 }
+
+#[test]
+fn kill_ring_save_copies_without_deleting() {
+    let mut le = editor_with("hello world");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed
+        .buf_mut()
+        .move_word(emacs_core::buffer::Direction::Forward);
+    le.run("kill-ring-save");
+    assert_eq!(le.text(), "hello world", "the region is not deleted");
+    assert_eq!(le.point(), 5, "point stays at the end of the region");
+    assert!(!le.ed.buf().mark_active(), "the mark is deactivated");
+    le.ed.buf_mut().move_to_buffer_end();
+    le.run("yank");
+    assert_eq!(
+        le.text(),
+        "hello worldhello",
+        "the copy is in the kill ring"
+    );
+}
+
+#[test]
+fn kill_ring_save_reports_what_was_copied() {
+    let mut le = editor_with("hello\nworld");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed.buf_mut().set_point(6); // include the newline in the region
+    le.run("kill-ring-save");
+    assert_eq!(
+        le.ed.echo(),
+        Some("Copied text from \"hello^J\""),
+        "control characters are made visible"
+    );
+}
+
+#[test]
+fn kill_ring_save_appends_after_a_kill_command() {
+    let mut le = editor_with("one two three");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed.buf_mut().set_point(8);
+    le.run("kill-line"); // kill ring: "three"; the mark stays at 0
+    assert_eq!(le.text(), "one two ");
+    le.run("kill-ring-save"); // copies "one two " and appends to "three"
+    le.ed.buf_mut().move_to_buffer_end();
+    le.run("yank");
+    assert_eq!(le.text(), "one two threeone two ");
+}
+
+#[test]
+fn kill_ring_save_prepends_for_a_backward_region() {
+    let mut le = editor_with("one two three");
+    le.ed.buf_mut().move_to_buffer_end();
+    le.run("set-mark-command");
+    le.ed.buf_mut().set_point(8);
+    le.run("backward-kill-word"); // kills "two "; point now before mark
+    assert_eq!(le.text(), "one three");
+    assert!(le.point() < le.ed.buf().mark().unwrap());
+    le.run("kill-ring-save"); // copies "three" before the last kill
+    assert_eq!(le.ed.echo(), Some("Copied text until \"three\""));
+    le.ed.buf_mut().move_to_buffer_end();
+    le.run("yank");
+    assert_eq!(le.text(), "one threethreetwo ");
+}
+
+#[test]
+fn kill_region_prepends_for_a_backward_region() {
+    let mut le = editor_with("one two three");
+    le.ed.buf_mut().move_to_buffer_end();
+    le.run("set-mark-command");
+    le.ed.buf_mut().set_point(0);
+    le.run("kill-word"); // kills "one"; point now before mark
+    assert_eq!(le.text(), " two three");
+    assert!(le.point() < le.ed.buf().mark().unwrap());
+    le.run("kill-region"); // kills " two three", prepending to "one"
+    assert_eq!(le.text(), "");
+    le.run("yank");
+    assert_eq!(le.text(), " two threeone");
+}
