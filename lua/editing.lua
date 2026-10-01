@@ -260,6 +260,9 @@ local function goto_line_number(n)
   local old = raw.point()
   raw.set_mark(old)
   raw.set_point(raw.line_start(line))
+  -- like Emacs: set the mark (C-x C-x can jump back) but keep the region
+  -- inactive, so nothing is highlighted
+  raw.deactivate_mark()
   emacs.message("Goto line " .. (raw.line_of_point() + 1))
 end
 
