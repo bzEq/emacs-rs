@@ -3,6 +3,25 @@
 
 local isearch = {}
 
+-- Emacs `isearch-text-char-description': show control characters (from a
+-- yanked kill, say) in the echo area instead of breaking the display.
+local function describe(text)
+  text = text:gsub("\r", "^M")
+  text = text:gsub("\n", "^J")
+  text = text:gsub("\t", "^I")
+  return text
+end
+
+-- Remove the last character of TEXT (DEL); a multibyte character is one
+-- character even though it spans several bytes.
+local function chop_last_char(text)
+  local i = #text
+  while i > 0 and text:byte(i) >= 0x80 and text:byte(i) < 0xC0 do
+    i = i - 1
+  end
+  return text:sub(1, i - 1)
+end
+
 function isearch.run(forward)
   local query = ""
   local start = raw.point()
@@ -14,7 +33,7 @@ function isearch.run(forward)
     local dir = forward and "" or " backward"
     local status = failed and "Failing " or ""
     local w = wrapped and " (wrapped)" or ""
-    return status .. "I-search" .. dir .. ": " .. query .. w
+    return status .. "I-search" .. dir .. ": " .. describe(query) .. w
   end
 
   local function step(restart)
@@ -117,7 +136,7 @@ function isearch.run(forward)
       step(true)
       emacs.message(prompt())
     elseif key == "DEL" then
-      query = query:sub(1, -2)
+      query = chop_last_char(query)
       matched = nil
       if query == "" then
         raw.set_point(start)
@@ -139,9 +158,25 @@ function isearch.run(forward)
       step(true)
       emacs.message(prompt())
     else
-      raw.clear_search_match()
-      emacs.replay_key()
-      return
+      -- A non-printing key that runs a command.  If the user's keymap
+      -- binds it to `yank' (global, local, or minor mode), pull the kill
+      -- into the search string like Emacs `isearch-yank-kill', so a
+      -- rebound yank key works during the search too.  Any other command
+      -- leaves the search and runs normally.
+      local status, cmd = raw.lookup_key(key)
+      if status == "command" and cmd == "yank" then
+        local text = M.current_kill()
+        if text then
+          query = query .. text
+          matched = nil
+          step(true)
+        end
+        emacs.message(prompt())
+      else
+        raw.clear_search_match()
+        emacs.replay_key()
+        return
+      end
     end
   end
 end

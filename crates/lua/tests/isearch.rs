@@ -162,3 +162,81 @@ fn dash_and_angle_bracket_are_literal() {
     assert_eq!(le.point(), 0);
     le.read_key(Key::ctrl('g'));
 }
+
+#[test]
+fn ctrl_y_yanks_the_kill_into_the_query() {
+    let mut le = LuaEd::new();
+    le.ed.buf_mut().insert("hello world hello");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed.buf_mut().set_point(5);
+    le.run("kill-ring-save");
+    le.ed.buf_mut().move_to_buffer_start();
+    start_search(&mut le, true);
+    assert!(le.read_key(Key::ctrl('y')), "search continues after C-y");
+    assert_eq!(le.point(), 0, "the yanked kill is the search string");
+    assert_eq!(le.ed.search_match(), Some((0, 5)));
+    le.read_key(Key::ctrl('s'));
+    assert_eq!(le.point(), 12, "C-s finds the next occurrence");
+    le.read_key(Key::ctrl('g'));
+}
+
+#[test]
+fn a_rebound_yank_key_yanks_into_the_query() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let mut le = LuaEd::new();
+    let dir = std::env::temp_dir().join(format!("em-isearch-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("init.lua");
+    std::fs::write(&path, "emacs.bind(\"C-p\", \"yank\")").unwrap();
+    le.load(&path);
+
+    le.ed.buf_mut().insert("hello world hello");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed.buf_mut().set_point(5);
+    le.run("kill-ring-save");
+    le.ed.buf_mut().move_to_buffer_start();
+    start_search(&mut le, true);
+    assert!(
+        le.read_key(Key::ctrl('p')),
+        "the rebound yank key works in isearch"
+    );
+    assert_eq!(le.point(), 0, "the kill was yanked into the query");
+    assert_eq!(le.ed.search_match(), Some((0, 5)));
+    le.read_key(Key::ctrl('g'));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ctrl_y_describes_multiline_kills() {
+    let mut le = LuaEd::new();
+    le.ed.buf_mut().insert("a\nb\nab");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.run("set-mark-command");
+    le.ed.buf_mut().set_point(3); // the region "a\nb"
+    le.run("kill-ring-save");
+    le.ed.buf_mut().move_to_buffer_start();
+    start_search(&mut le, true);
+    le.read_key(Key::ctrl('y'));
+    assert_eq!(le.ed.echo(), Some("I-search: a^Jb"));
+    assert_eq!(le.ed.search_match(), Some((0, 3)));
+    le.read_key(Key::ctrl('g'));
+}
+
+#[test]
+fn backspace_removes_a_whole_multibyte_character() {
+    let mut le = LuaEd::new();
+    le.ed.buf_mut().insert("中文 中");
+    le.ed.buf_mut().move_to_buffer_start();
+    start_search(&mut le, true);
+    le.read_key(Key::plain('中'));
+    le.read_key(Key::plain('文'));
+    assert_eq!(le.ed.search_match(), Some((0, 2)));
+    le.read_key(Key::key(KeyCode::Backspace));
+    assert_eq!(le.ed.search_match(), Some((0, 1)), "back to \"中\"");
+    assert_eq!(le.ed.echo(), Some("I-search: 中"));
+    le.read_key(Key::ctrl('g'));
+}
