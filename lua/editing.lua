@@ -146,19 +146,26 @@ end, "Delete the character before point.")
 
 M.define("kill-line", function(prefix)
   local n = math.max(prefix, 1)
-  local killed = ""
-  for _ = 1, n do
-    local line = raw.line_of_point()
-    local line_start = raw.line_start(line)
-    local eol = line_start + raw.line_len(line)
-    if raw.point() == eol then
-      killed = killed .. emacs.delete_range(eol, raw.step_right(eol))
-    else
-      killed = killed .. emacs.delete_range(raw.point(), eol)
-    end
+  if n > 1 then
+    -- With an argument, kill that many lines from point (Emacs:
+    -- forward-visible-line n, then kill-region).
+    local target = math.min(raw.line_of_point() + n, raw.len_lines() - 1)
+    M.kill(emacs.delete_range(raw.point(), raw.line_start(target)))
+    return
   end
-  M.kill(killed)
-end, "Kill the rest of the current line.")
+  local line = raw.line_of_point()
+  local line_start = raw.line_start(line)
+  local eol = line_start + raw.line_len(line)
+  local p = raw.point()
+  local rest = raw.get_text(p, eol)
+  if rest:match("[^ \t]") == nil then
+    -- only blanks (or nothing) between point and the line end: kill
+    -- through the newline, joining the next line (Emacs kill-line)
+    M.kill(emacs.delete_range(p, raw.step_right(eol)))
+  else
+    M.kill(emacs.delete_range(p, eol))
+  end
+end, "Kill the rest of the current line; if no nonblanks there, kill thru newline.")
 
 M.define("kill-word", function(prefix)
   local n = math.max(prefix, 1)

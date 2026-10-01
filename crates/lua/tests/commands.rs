@@ -32,6 +32,59 @@ fn kill_line_at_eol_kills_newline() {
 }
 
 #[test]
+fn kill_line_with_only_blanks_left_kills_newline() {
+    // Emacs: "if no nonblanks there, kill thru newline" — trailing blanks
+    // after point do not prevent joining the next line
+    let mut le = editor_with("abc   \ndef");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    assert_eq!(le.ed.buf().point(), 3);
+    le.run("kill-line");
+    assert_eq!(le.text(), "abcdef", "killed the blanks and the newline");
+}
+
+#[test]
+fn kill_line_stops_before_nonblank_rest() {
+    let mut le = editor_with("foo bar baz\nnext");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    assert_eq!(le.ed.buf().point(), 4);
+    le.run("kill-line");
+    assert_eq!(le.text(), "foo \nnext", "nonblank rest: killed to eol only");
+}
+
+#[test]
+fn kill_line_prefix_kills_several_lines() {
+    let mut le = editor_with("one\ntwo\nthree\n");
+    le.ed.buf_mut().move_to_buffer_start();
+    le.ed
+        .buf_mut()
+        .move_char(emacs_core::buffer::Direction::Forward);
+    le.run("digit-argument-2");
+    le.run("kill-line");
+    assert_eq!(le.text(), "othree\n", "killed through two line endings");
+}
+
+#[test]
 fn consecutive_kills_accumulate() {
     let mut le = editor_with("abc def");
     le.ed.buf_mut().move_to_buffer_start();
