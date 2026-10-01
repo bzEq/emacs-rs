@@ -208,7 +208,8 @@ mod tests {
         let mut mb = Minibuffer::new("M-x ".into(), false, None);
         mb.insert_char('a');
         mb.insert_char('b');
-        mb.buffer_mut().move_char(crate::buffer::Direction::Backward);
+        mb.buffer_mut()
+            .move_char(crate::buffer::Direction::Backward);
         mb.insert_char('X');
         assert_eq!(mb.input(), "aXb");
         mb.delete_backward();
@@ -241,7 +242,8 @@ mod tests {
         let mut mb = Minibuffer::new(String::new(), false, None);
         mb.insert_char('中');
         mb.insert_char('文');
-        mb.buffer_mut().move_char(crate::buffer::Direction::Backward);
+        mb.buffer_mut()
+            .move_char(crate::buffer::Direction::Backward);
         mb.insert_char('x');
         assert_eq!(mb.input(), "中x文");
         mb.buffer_mut().move_char(crate::buffer::Direction::Forward);
@@ -254,9 +256,14 @@ mod tests {
     fn initial_input_and_file_name_shadow() {
         let mut mb = Minibuffer::new("Find file: ".into(), true, Some("/home/user/".into()));
         assert_eq!(mb.input(), "/home/user/");
-        assert_eq!(mb.buffer().point(), 11, "point at the end of the initial input");
+        assert_eq!(
+            mb.buffer().point(),
+            11,
+            "point at the end of the initial input"
+        );
         // motion over the pre-filled input
-        mb.buffer_mut().move_char(crate::buffer::Direction::Backward);
+        mb.buffer_mut()
+            .move_char(crate::buffer::Direction::Backward);
         assert_eq!(mb.buffer().point(), 10);
         mb.buffer_mut().move_char(crate::buffer::Direction::Forward);
         assert_eq!(mb.buffer().point(), 11);
