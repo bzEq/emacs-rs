@@ -44,7 +44,11 @@ fn listing_sorted_dirs_first() {
     let mut le = LuaEd::new();
     open_dired(&mut le, &t.path());
     let text = le.text();
-    assert!(text.starts_with(&format!("  {}:\n", t.path())));
+    let header = text.lines().next().unwrap();
+    assert_eq!(
+        std::path::Path::new(header.trim_start_matches("  ").trim_end_matches(':')),
+        t.0.canonicalize().unwrap().as_path()
+    );
     assert!(text.contains("adir/"));
     let lines: Vec<&str> = text.lines().collect();
     // header (2 lines) + . .. adir a.txt b.txt
@@ -99,10 +103,12 @@ fn open_nested_directory() {
     le.ed.buf_mut().move_to_line(4); // "sub" is the first entry after . and ..
     le.ed.buf_mut().move_to_line_start();
     le.run("dired-open");
-    assert!(le.text().starts_with(&format!(
-        "  {}:\n",
-        t.0.join("sub").canonicalize().unwrap().display()
-    )));
+    let text = le.text();
+    let header = text.lines().next().unwrap();
+    assert_eq!(
+        std::path::Path::new(header.trim_start_matches("  ").trim_end_matches(':')),
+        t.0.join("sub").canonicalize().unwrap().as_path()
+    );
 }
 
 #[test]

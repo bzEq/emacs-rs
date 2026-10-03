@@ -20,7 +20,9 @@
 //! occurs. The editor must not move while a call is in flight (it is owned
 //! by the app's main function, so this holds).
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
 use mlua::thread::ThreadStatus;
@@ -88,6 +90,19 @@ fn anyhow_err(e: mlua::Error) -> anyhow::Error {
     anyhow!("{e}")
 }
 
+fn buffer_idx(ed: &Editor, id: usize) -> mlua::Result<usize> {
+    ed.buffer_index_opt(id)
+        .ok_or_else(|| mlua::Error::RuntimeError(format!("no buffer with id {id}")))
+}
+
+fn ensure_writable(ed: &Editor) -> mlua::Result<()> {
+    if ed.buf().read_only() {
+        Err(mlua::Error::RuntimeError("Buffer is read-only".into()))
+    } else {
+        Ok(())
+    }
+}
+
 /// Run `f` with the editor reachable from Lua callbacks.
 fn with_editor<T>(
     lua: &Lua,
@@ -109,7 +124,8 @@ fn parse_keymap_table(_lua: &Lua, table: Option<Table>) -> mlua::Result<Option<K
     for pair in t.pairs::<String, String>() {
         let (seq, cmd) = pair?;
         let keys = emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
-        km.bind_sequence(&keys, &cmd);
+        km.bind_sequence(&keys, &cmd)
+            .map_err(mlua::Error::RuntimeError)?;
     }
     if km.is_empty() {
         Ok(None)
@@ -202,17 +218,27 @@ fn interpret(thread: Thread, v: Value) -> mlua::Result<(CommandOutcome, Option<F
 struct PendingThread {
     thread: Thread,
     completion: Option<Function>,
+    request: PendingRequest,
 }
 
 pub struct LuaHost {
     lua: Lua,
-    pending: Option<PendingThread>,
+    /// The active command is the last entry.  Nested inline commands may
+    /// yield a raw key, but minibuffer reads are rejected before yielding.
+    pending: Vec<PendingThread>,
+    /// Set while Lua is executing a coroutine whose outer pending request
+    /// must remain intact.  The read helpers consult this before yielding.
+    read_guard: Rc<Cell<bool>>,
 }
 
 impl LuaHost {
     pub fn new() -> Result<Self> {
         let lua = Lua::new();
-        let mut host = LuaHost { lua, pending: None };
+        let mut host = LuaHost {
+            lua,
+            pending: Vec::new(),
+            read_guard: Rc::new(Cell::new(false)),
+        };
         host.install_api().map_err(anyhow_err)?;
         Ok(host)
     }
@@ -225,7 +251,9 @@ impl LuaHost {
         extra: Option<char>,
         editor: &mut Editor,
     ) -> Result<CommandOutcome> {
-        let (outcome, completion, thread) = with_editor(&self.lua, editor, |lua| {
+        let guarded = !self.pending.is_empty();
+        self.read_guard.set(guarded);
+        let result = with_editor(&self.lua, editor, |lua| {
             let run = run_command_fn(lua)?;
             let thread = lua.create_thread(run)?;
             let v: Value = match extra {
@@ -234,18 +262,28 @@ impl LuaHost {
             };
             let (outcome, completion) = interpret(thread.clone(), v)?;
             Ok((outcome, completion, thread))
-        })?;
-        if matches!(outcome, CommandOutcome::Pending(_)) {
-            // Emacs with `enable-recursive-minibuffers' nil: a command run
-            // while a read is active may not start a read of its own.
-            // Refuse before overwriting the outer pending thread, so the
-            // active read (and its minibuffer input) survives intact.
-            if self.pending.is_some() {
+        });
+        self.read_guard.set(false);
+        let (outcome, completion, thread) = result?;
+        if let CommandOutcome::Pending(request) = &outcome {
+            // Recursive minibuffer reads are disabled, but raw key readers
+            // (such as isearch) may temporarily run while another read owns
+            // the minibuffer.
+            if !self.pending.is_empty()
+                && matches!(
+                    request,
+                    PendingRequest::ReadString { .. } | PendingRequest::ReadYesNo { .. }
+                )
+            {
                 return Err(anyhow!(
                     "Command attempted to use minibuffer while in minibuffer"
                 ));
             }
-            self.pending = Some(PendingThread { thread, completion });
+            self.pending.push(PendingThread {
+                thread,
+                completion,
+                request: request.clone(),
+            });
         }
         Ok(outcome)
     }
@@ -258,9 +296,14 @@ impl LuaHost {
     ) -> Result<CommandOutcome> {
         let pt = self
             .pending
-            .take()
+            .pop()
             .ok_or_else(|| anyhow!("no pending command to resume"))?;
-        let (outcome, completion) = with_editor(&self.lua, editor, |_lua| {
+        if !pt.request.accepts(&value) {
+            self.pending.push(pt);
+            return Err(anyhow!("resume value does not match pending request"));
+        }
+        self.read_guard.set(!self.pending.is_empty());
+        let result = with_editor(&self.lua, editor, |_lua| {
             let v: Value = match value {
                 ResumeValue::String(Some(s)) => pt.thread.resume(s)?,
                 ResumeValue::String(None) => pt.thread.resume(())?,
@@ -268,11 +311,20 @@ impl LuaHost {
                 ResumeValue::Key(k) => pt.thread.resume(k.to_string())?,
             };
             interpret(pt.thread.clone(), v)
-        })?;
-        if matches!(outcome, CommandOutcome::Pending(_)) {
-            self.pending = Some(PendingThread {
+        });
+        self.read_guard.set(false);
+        let (outcome, completion) = match result {
+            Ok(x) => x,
+            Err(e) => {
+                self.pending.push(pt);
+                return Err(e);
+            }
+        };
+        if let CommandOutcome::Pending(request) = &outcome {
+            self.pending.push(PendingThread {
                 thread: pt.thread,
                 completion,
+                request: request.clone(),
             });
         }
         Ok(outcome)
@@ -289,7 +341,9 @@ impl LuaHost {
         raw.set(
             "insert",
             lua.create_function(|lua, text: String| {
-                editor_ref(lua)?.buf_mut().insert(&text);
+                let ed = editor_ref(lua)?;
+                ensure_writable(ed)?;
+                ed.buf_mut().insert(&text);
                 Ok(())
             })?,
         )?;
@@ -297,6 +351,7 @@ impl LuaHost {
             "insert_at",
             lua.create_function(|lua, (pos, text): (usize, String)| {
                 let ed = editor_ref(lua)?;
+                ensure_writable(ed)?;
                 let len = text.chars().count();
                 ed.buf_mut().insert_at(pos, &text);
                 Ok(pos + len)
@@ -305,7 +360,17 @@ impl LuaHost {
         raw.set(
             "delete_range",
             lua.create_function(|lua, (start, end): (usize, usize)| {
-                Ok(editor_ref(lua)?.buf_mut().delete_range(start, end))
+                let ed = editor_ref(lua)?;
+                ensure_writable(ed)?;
+                Ok(ed.buf_mut().delete_range(start, end))
+            })?,
+        )?;
+        raw.set(
+            "replace_range_internal",
+            lua.create_function(|lua, (start, end, text): (usize, usize, String)| {
+                let ed = editor_ref(lua)?;
+                ed.buf_mut().replace_range_internal(start, end, &text);
+                Ok(())
             })?,
         )?;
         raw.set(
@@ -543,16 +608,13 @@ impl LuaHost {
         )?;
         raw.set(
             "name",
-            lua.create_function(|lua, ()| {
-                let ed = editor_ref(lua)?;
-                Ok(ed.buffers()[ed.selected_buffer_index()].name().to_string())
-            })?,
+            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf().name().to_string()))?,
         )?;
         raw.set(
             "path",
             lua.create_function(|lua, ()| {
-                let ed = editor_ref(lua)?;
-                Ok(ed.buffers()[ed.selected_buffer_index()]
+                Ok(editor_ref(lua)?
+                    .buf()
                     .path()
                     .map(|p| p.display().to_string()))
             })?,
@@ -567,10 +629,7 @@ impl LuaHost {
         )?;
         raw.set(
             "mode",
-            lua.create_function(|lua, ()| {
-                let ed = editor_ref(lua)?;
-                Ok(ed.buffers()[ed.selected_buffer_index()].mode().name.clone())
-            })?,
+            lua.create_function(|lua, ()| Ok(editor_ref(lua)?.buf().mode().name.clone()))?,
         )?;
 
         // -- buffer management ----------------------------------------------
@@ -588,7 +647,7 @@ impl LuaHost {
             "buffer_info",
             lua.create_function(|lua, id: usize| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.buffer_index(id);
+                let idx = buffer_idx(ed, id)?;
                 let b = &ed.buffers()[idx];
                 let t = lua.create_table()?;
                 t.set("id", id)?;
@@ -606,7 +665,9 @@ impl LuaHost {
         raw.set(
             "select_buffer",
             lua.create_function(|lua, id: usize| {
-                editor_ref(lua)?.set_selected_buffer(id);
+                let ed = editor_ref(lua)?;
+                buffer_idx(ed, id)?;
+                ed.set_selected_buffer(id);
                 Ok(())
             })?,
         )?;
@@ -617,7 +678,9 @@ impl LuaHost {
         raw.set(
             "kill_buffer",
             lua.create_function(|lua, id: usize| {
-                editor_ref(lua)?.kill_buffer_at(id);
+                editor_ref(lua)?
+                    .kill_buffer_at(id)
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
                 Ok(())
             })?,
         )?;
@@ -659,7 +722,7 @@ impl LuaHost {
             "set_buffer_name",
             lua.create_function(|lua, (id, name): (usize, String)| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.buffer_index(id);
+                let idx = buffer_idx(ed, id)?;
                 ed.buffers_mut()[idx].set_name(name);
                 Ok(())
             })?,
@@ -668,7 +731,7 @@ impl LuaHost {
             "set_buffer_path",
             lua.create_function(|lua, (id, path): (usize, String)| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.buffer_index(id);
+                let idx = buffer_idx(ed, id)?;
                 ed.buffers_mut()[idx].set_path(Some(PathBuf::from(path)));
                 Ok(())
             })?,
@@ -677,7 +740,7 @@ impl LuaHost {
             "set_buffer_modified",
             lua.create_function(|lua, (id, m): (usize, bool)| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.buffer_index(id);
+                let idx = buffer_idx(ed, id)?;
                 ed.buffers_mut()[idx].set_modified(m);
                 Ok(())
             })?,
@@ -686,7 +749,7 @@ impl LuaHost {
             "set_buffer_read_only",
             lua.create_function(|lua, (id, ro): (usize, bool)| {
                 let ed = editor_ref(lua)?;
-                let idx = ed.buffer_index(id);
+                let idx = buffer_idx(ed, id)?;
                 ed.buffers_mut()[idx].set_read_only(ro);
                 Ok(())
             })?,
@@ -694,15 +757,28 @@ impl LuaHost {
         raw.set(
             "save_buffer_to_disk",
             lua.create_function(|lua, id: usize| {
-                editor_ref(lua)?
-                    .save_buffer_to_disk(id)
+                let ed = editor_ref(lua)?;
+                buffer_idx(ed, id)?;
+                ed.save_buffer_to_disk(id)
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+            })?,
+        )?;
+        raw.set(
+            "save_buffer_as",
+            lua.create_function(|lua, (id, path): (usize, String)| {
+                let ed = editor_ref(lua)?;
+                let idx = buffer_idx(ed, id)?;
+                ed.buffers()[idx]
+                    .save_to(&path)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
         )?;
         raw.set(
             "replace_buffer_content",
             lua.create_function(|lua, (id, text): (usize, String)| {
-                editor_ref(lua)?.replace_buffer_content(id, &text);
+                let ed = editor_ref(lua)?;
+                buffer_idx(ed, id)?;
+                ed.replace_buffer_content(id, &text);
                 Ok(())
             })?,
         )?;
@@ -769,7 +845,10 @@ impl LuaHost {
             lua.create_function(|lua, (seq, cmd): (String, String)| {
                 let keys =
                     emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
-                editor_ref(lua)?.keymap_mut().bind_sequence(&keys, &cmd);
+                editor_ref(lua)?
+                    .keymap_mut()
+                    .bind_sequence(&keys, &cmd)
+                    .map_err(mlua::Error::RuntimeError)?;
                 Ok(())
             })?,
         )?;
@@ -780,7 +859,8 @@ impl LuaHost {
                     emacs_core::key::parse_sequence(&seq).map_err(mlua::Error::RuntimeError)?;
                 let ed = editor_ref(lua)?;
                 let idx = ed.current_buffer_index();
-                ed.local_set_key(idx, &keys, &cmd);
+                ed.local_set_key(idx, &keys, &cmd)
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
                 Ok(())
             })?,
         )?;
@@ -1008,8 +1088,9 @@ impl LuaHost {
         raw.set(
             "reload_buffer_from_disk",
             lua.create_function(|lua, id: usize| {
-                editor_ref(lua)?
-                    .reload_buffer_from_disk(id)
+                let ed = editor_ref(lua)?;
+                buffer_idx(ed, id)?;
+                ed.reload_buffer_from_disk(id)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
             })?,
         )?;
@@ -1111,6 +1192,18 @@ impl LuaHost {
         )?;
 
         globals.set("raw", raw)?;
+        let guard = self.read_guard.clone();
+        globals.set(
+            "_read_guard",
+            lua.create_function(move |_lua, kind: String| {
+                if guard.get() && (kind == "read_string" || kind == "read_yes_no") {
+                    return Err(mlua::Error::RuntimeError(
+                        "Command attempted to use minibuffer while in minibuffer".into(),
+                    ));
+                }
+                Ok(())
+            })?,
+        )?;
         Ok(())
     }
 }
@@ -1201,7 +1294,7 @@ impl ScriptHost for LuaHost {
     }
 
     fn update_completion(&mut self, input: &str, editor: &mut Editor) -> Result<Vec<String>> {
-        let f = self.pending.as_ref().and_then(|p| p.completion.clone());
+        let f = self.pending.last().and_then(|p| p.completion.clone());
         let Some(f) = f else {
             return Ok(Vec::new());
         };

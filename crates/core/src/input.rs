@@ -26,6 +26,14 @@ pub fn handle_key(ed: &mut Editor, key: Key) -> Result<()> {
             ed.esc_prefix()
         );
     }
+    // A pending read-key owns Esc as data; only normal dispatch treats it as
+    // the Meta prefix. Check before terminal Ctrl-X translations as well.
+    if ed
+        .pending()
+        .is_some_and(|p| matches!(p, PendingRequest::ReadKey))
+    {
+        return dispatch(ed, key);
+    }
     let key = translate_after_ctrl_x(ed, key);
     // Esc acts as a Meta prefix (ESC x == M-x).
     if key.code == KeyCode::Esc && key.mods.is_empty() {

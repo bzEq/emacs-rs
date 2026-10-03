@@ -181,9 +181,8 @@ local function set_mark(marked)
   local d = M.dired[raw.id()]
   if is_dot(d.entries[i].name) then return end
   local line_start = raw.line_start(raw.line_of_point())
-  raw.delete_range(line_start, line_start + 1)
+  raw.replace_range_internal(line_start, line_start + 1, marked and "*" or " ")
   raw.set_point(line_start)
-  raw.insert(marked and "*" or " ")
   raw.set_buffer_modified(raw.id(), false)
   d.entries[i].marked = marked
 end

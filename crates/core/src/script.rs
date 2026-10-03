@@ -35,6 +35,20 @@ pub enum ResumeValue {
     Key(Key),
 }
 
+impl PendingRequest {
+    /// Whether a resume value belongs to this request.  The editor checks this
+    /// before destroying the active minibuffer, so malformed host calls leave
+    /// all pending state intact.
+    pub fn accepts(&self, value: &ResumeValue) -> bool {
+        matches!(
+            (self, value),
+            (Self::ReadString { .. }, ResumeValue::String(_))
+                | (Self::ReadYesNo { .. }, ResumeValue::Bool(_))
+                | (Self::ReadKey, ResumeValue::Key(_))
+        )
+    }
+}
+
 /// The result of running (part of) a command coroutine.
 #[derive(Debug)]
 pub enum CommandOutcome {

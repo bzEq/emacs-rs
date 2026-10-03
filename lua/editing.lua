@@ -96,10 +96,12 @@ M.define("self-insert-command", function(prefix, extra)
 end, "Insert the typed character.")
 
 M.define("newline", function()
+  if not M.ensure_writable() then return end
   emacs.insert("\n")
 end, "Insert a newline.")
 
 M.define("newline-and-indent", function()
+  if not M.ensure_writable() then return end
   local unit = M.current_indent_unit()
   emacs.insert("\n")
   if unit then
@@ -108,6 +110,7 @@ M.define("newline-and-indent", function()
 end, "Insert a newline and indent the new line.")
 
 M.define("electric-newline-and-maybe-indent", function()
+  if not M.ensure_writable() then return end
   local unit = M.current_indent_unit()
   emacs.insert("\n")
   if unit then
@@ -116,6 +119,7 @@ M.define("electric-newline-and-maybe-indent", function()
 end, "Insert a newline and indent the new line.")
 
 M.define("indent-for-tab-command", function()
+  if not M.ensure_writable() then return end
   local unit = M.current_indent_unit()
   if unit then
     local line = raw.line_of_point()
@@ -131,12 +135,14 @@ M.define("indent-for-tab-command", function()
 end, "Indent the current line, or insert a tab.")
 
 M.define("delete-char", function(prefix)
+  if not M.ensure_writable() then return end
   for _ = 1, math.max(prefix, 1) do
     emacs.delete_forward()
   end
 end, "Delete the character at point.")
 
 M.define("backward-delete-char", function(prefix)
+  if not M.ensure_writable() then return end
   for _ = 1, math.max(prefix, 1) do
     if not backward_delete_indent() then
       emacs.delete_backward()
@@ -145,6 +151,7 @@ M.define("backward-delete-char", function(prefix)
 end, "Delete the character before point.")
 
 M.define("kill-line", function(prefix)
+  if not M.ensure_writable() then return end
   local n = math.max(prefix, 1)
   if n > 1 then
     -- With an argument, kill that many lines from point (Emacs:
@@ -168,6 +175,7 @@ M.define("kill-line", function(prefix)
 end, "Kill the rest of the current line; if no nonblanks there, kill thru newline.")
 
 M.define("kill-word", function(prefix)
+  if not M.ensure_writable() then return end
   local n = math.max(prefix, 1)
   local killed = ""
   for _ = 1, n do
@@ -179,6 +187,7 @@ M.define("kill-word", function(prefix)
 end, "Kill the word after point.")
 
 M.define("backward-kill-word", function(prefix)
+  if not M.ensure_writable() then return end
   local n = math.max(prefix, 1)
   local killed = ""
   for _ = 1, n do
@@ -190,6 +199,7 @@ M.define("backward-kill-word", function(prefix)
 end, "Kill the word before point.")
 
 M.define("kill-region", function()
+  if not M.ensure_writable() then return end
   local s, e = raw.region()
   if not s then
     error("The mark is not set now, so there is no region")
@@ -219,6 +229,10 @@ local function indicate_copied_region(text, before)
 end
 
 M.define("kill-ring-save", function()
+  if raw.read_only() then
+    emacs.error("Buffer is read-only")
+    return
+  end
   local s, e = raw.region()
   if not s then
     error("The mark is not set now, so there is no region")
@@ -231,6 +245,7 @@ M.define("kill-ring-save", function()
 end, "Save the region as if killed, but don't kill it.")
 
 M.define("yank", function(prefix)
+  if not M.ensure_writable() then return end
   local t = M.current_kill()
   if not t then
     error("Kill ring is empty")
@@ -243,6 +258,7 @@ M.define("yank", function(prefix)
 end, "Insert the most recent kill.")
 
 M.define("yank-pop", function()
+  if not M.ensure_writable() then return end
   if M.last_command ~= "yank" and M.last_command ~= "yank-pop" then
     error("Previous command was not a yank")
   end

@@ -46,7 +46,16 @@ local function record_undo(id, entry)
   undo_list(id)[#undo_list(id) + 1] = entry
 end
 
+function M.ensure_writable()
+  if raw.read_only() then
+    emacs.error("Buffer is read-only")
+    return false
+  end
+  return true
+end
+
 function emacs.insert(text)
+  if not M.ensure_writable() then return end
   if text == nil or text == "" then return end
   local pos = raw.point()
   raw.insert(text)
@@ -54,6 +63,7 @@ function emacs.insert(text)
 end
 
 function emacs.delete_range(a, b)
+  if not M.ensure_writable() then return "" end
   local id = raw.id()
   local text = raw.delete_range(a, b)
   if text ~= "" then
@@ -85,6 +95,7 @@ end
 -- ---- undo -----------------------------------------------------------------
 
 function M.undo()
+  if not M.ensure_writable() then return end
   local id = raw.id()
   local l = undo_list(id)
   if #l == 0 then
@@ -204,6 +215,11 @@ function M.run_command(name, extra)
   if not ok then
     err = tostring(err):gsub("^%[.-%]:%d+: ", "")
     emacs.error(err)
+    -- Recursive minibuffer rejection must escape this command's pcall so the
+    -- host can preserve the outer coroutine and report the failed command.
+    if err:find("attempted to use minibuffer while in minibuffer", 1, true) then
+      error(err)
+    end
   end
   if not is_prefix_setter(name) then
     M.prefix = { digits = nil, negative = false, universal = 0 }
@@ -222,6 +238,7 @@ end
 -- ---- synchronous reads (coroutine yields) ----------------------------------
 
 function emacs.read_string(prompt, completion, initial)
+  _read_guard("read_string")
   local result = coroutine.yield({
     type = "read_string",
     prompt = prompt,
@@ -232,6 +249,7 @@ function emacs.read_string(prompt, completion, initial)
 end
 
 function emacs.read_yes_no(prompt)
+  _read_guard("read_yes_no")
   return coroutine.yield({ type = "read_yes_no", prompt = prompt })
 end
 
@@ -356,7 +374,8 @@ M.safe_read_dir = safe_read_dir
 function M.default_directory()
   local d = M.dired[raw.selected_buffer_id()]
   if d then return d.dir end
-  local p = raw.path()
+  local selected = raw.buffer_info(raw.selected_buffer_id())
+  local p = selected.path
   if p then
     local parent = p:match("^(.*)/[^/]+$")
     if p:sub(1, 1) == "/" then
