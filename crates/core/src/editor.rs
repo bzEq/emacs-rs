@@ -50,8 +50,11 @@ pub struct Editor {
     minibuffer: Option<Minibuffer>,
     /// Accepted minibuffer inputs, for C-n/C-p history recall.
     minibuffer_history: Vec<String>,
-    /// What a suspended command coroutine is waiting for.
+    /// What the top suspended command coroutine is waiting for.
     pending: Option<PendingRequest>,
+    /// Requests belonging to outer coroutines while a nested read-key loop
+    /// temporarily owns input.
+    pending_stack: Vec<PendingRequest>,
     /// Keys of the key sequence in progress (for prefix resolution).
     pending_keys: Vec<Key>,
     /// Esc acts as a Meta prefix (ESC x == M-x).
@@ -97,6 +100,7 @@ impl Editor {
             minibuffer: None,
             minibuffer_history: Vec::new(),
             pending: None,
+            pending_stack: Vec::new(),
             pending_keys: Vec::new(),
             esc_prefix: false,
             quit: false,
@@ -126,10 +130,12 @@ impl Editor {
 
     /// Index into `buffers` of the buffer with the given id.
     pub fn buffer_index(&self, id: usize) -> usize {
-        self.buffers
-            .iter()
-            .position(|b| b.id == id)
-            .expect("buffer id exists")
+        self.buffer_index_opt(id).expect("buffer id exists")
+    }
+
+    /// Fallible buffer lookup for IDs supplied by Lua or file-watch events.
+    pub fn buffer_index_opt(&self, id: usize) -> Option<usize> {
+        self.buffers.iter().position(|b| b.id == id)
     }
 
     /// Index of the buffer editing commands act on: the minibuffer input
@@ -283,8 +289,17 @@ impl Editor {
 
     /// Kill the buffer with id `id`, pointing any windows that displayed it
     /// at another buffer.
-    pub fn kill_buffer_at(&mut self, id: usize) {
-        let idx = self.buffer_index(id);
+    pub fn kill_buffer_at(&mut self, id: usize) -> Result<()> {
+        if self
+            .minibuffer
+            .as_ref()
+            .is_some_and(|mb| mb.buffer_id == id)
+        {
+            return Err(anyhow!("cannot kill the active minibuffer"));
+        }
+        let idx = self
+            .buffer_index_opt(id)
+            .ok_or_else(|| anyhow!("no buffer with id {id}"))?;
         self.remove_buffer(idx);
         if self.buffers().is_empty() {
             let scratch = Buffer::new("*scratch*");
@@ -295,12 +310,15 @@ impl Editor {
             let keep_id = self.buffers()[0].id;
             self.replace_buffer_in_windows(id, keep_id);
         }
+        Ok(())
     }
 
     /// Write the buffer with `id` to its file (raises on IO error; the Lua
     /// layer handles modified flags and save hooks).
     pub fn save_buffer_to_disk(&mut self, id: usize) -> Result<()> {
-        let idx = self.buffer_index(id);
+        let idx = self
+            .buffer_index_opt(id)
+            .ok_or_else(|| anyhow!("no buffer with id {id}"))?;
         self.buffers()[idx].save().map_err(|e| anyhow!("{e}"))
     }
 
@@ -311,15 +329,8 @@ impl Editor {
     /// and the *Help* buffer), leaving point at the start and the buffer
     /// unmodified.
     pub fn replace_buffer_content(&mut self, id: usize, text: &str) {
-        let idx = self.buffer_index(id);
-        let len = self.buffers[idx].rope().len_chars();
-        if len > 0 {
-            let _ = self.buffers[idx].delete_range(0, len);
-        }
-        self.buffers[idx].set_point(0);
-        self.buffers[idx].insert(text);
-        self.buffers[idx].set_point(0);
-        self.buffers[idx].set_modified(false);
+        let idx = self.buffer_index_opt(id).expect("buffer id exists");
+        self.buffers[idx].replace_content(text);
     }
 
     // --- windows -----------------------------------------------------------
@@ -624,8 +635,11 @@ impl Editor {
 
     /// Add a binding to the selected buffer's local keymap, creating it if
     /// needed.
-    pub fn local_set_key(&mut self, idx: usize, seq: &[Key], cmd: &str) {
-        self.buffers[idx].local_keymap_mut().bind_sequence(seq, cmd);
+    pub fn local_set_key(&mut self, idx: usize, seq: &[Key], cmd: &str) -> Result<()> {
+        self.buffers[idx]
+            .local_keymap_mut()
+            .bind_sequence(seq, cmd)
+            .map_err(|e| anyhow!(e))
     }
 
     // --- key sequence state ------------------------------------------------
@@ -726,7 +740,7 @@ impl Editor {
     /// read as a whole.
     fn end_minibuffer(&mut self) {
         if let Some(old) = self.minibuffer.take() {
-            self.kill_buffer_at(old.buffer_id);
+            let _ = self.kill_buffer_at(old.buffer_id);
         }
     }
 
@@ -735,8 +749,16 @@ impl Editor {
     /// cleared.  A command finishing (`finish_command`) never ends a read
     /// by itself.
     pub fn end_pending_read(&mut self) {
-        self.end_minibuffer();
-        self.pending = None;
+        let Some(request) = self.pending.take() else {
+            return;
+        };
+        if matches!(
+            request,
+            PendingRequest::ReadString { .. } | PendingRequest::ReadYesNo { .. }
+        ) {
+            self.end_minibuffer();
+        }
+        self.pending = self.pending_stack.pop();
     }
 
     /// C-n / C-p: step through the input history, recalling entries into
@@ -827,7 +849,13 @@ impl Editor {
                 None
             }
             CommandOutcome::Pending(p) => {
-                self.end_minibuffer();
+                if matches!(p, PendingRequest::ReadKey) && self.pending.is_some() {
+                    if let Some(outer) = self.pending.take() {
+                        self.pending_stack.push(outer);
+                    }
+                } else {
+                    self.end_minibuffer();
+                }
                 self.pending = Some(p);
                 None
             }
@@ -894,7 +922,24 @@ impl Editor {
     /// continuation runs against the main buffer (Emacs:
     /// `read-from-minibuffer` returns, then the caller continues).
     pub fn resume_pending(&mut self, value: ResumeValue) -> Result<CommandOutcome> {
-        self.end_pending_read();
+        let Some(request) = self.pending.as_ref() else {
+            let mut out = Err(anyhow!("no script host attached"));
+            self.with_host(|ed, host| {
+                out = host.resume_pending(value, ed);
+            });
+            return out;
+        };
+        if !request.accepts(&value) {
+            return Err(anyhow!("resume value does not match pending request"));
+        }
+        let is_minibuffer = matches!(
+            request,
+            PendingRequest::ReadString { .. } | PendingRequest::ReadYesNo { .. }
+        );
+        if is_minibuffer {
+            self.end_minibuffer();
+        }
+        self.pending = self.pending_stack.pop();
         let mut out = Err(anyhow!("no script host attached"));
         self.with_host(|ed, host| {
             out = host.resume_pending(value, ed);
@@ -941,7 +986,9 @@ impl Editor {
 
     /// Re-read the file of the buffer with `id` from disk.
     pub fn reload_buffer_from_disk(&mut self, id: usize) -> Result<()> {
-        let idx = self.buffer_index(id);
+        let idx = self
+            .buffer_index_opt(id)
+            .ok_or_else(|| anyhow!("no buffer with id {id}"))?;
         self.buffers[idx]
             .reload_from_disk()
             .map_err(|e| anyhow!("{e}"))
@@ -1059,7 +1106,8 @@ mod tests {
         km.bind_sequence(
             &crate::key::parse_sequence("C-s").unwrap(),
             "isearch-repeat-forward",
-        );
+        )
+        .unwrap();
         ed.set_overriding_keymap(km);
         assert_eq!(
             ed.lookup_overriding_key(&crate::key::parse_sequence("C-s").unwrap()),
@@ -1085,13 +1133,15 @@ mod tests {
     fn local_keymap_overrides_global() {
         let mut ed = Editor::new(20, 80);
         ed.keymap_mut()
-            .bind_sequence(&crate::key::parse_sequence("C-f").unwrap(), "forward-char");
+            .bind_sequence(&crate::key::parse_sequence("C-f").unwrap(), "forward-char")
+            .unwrap();
         let idx = ed.selected_buffer_index();
         ed.local_set_key(
             idx,
             &crate::key::parse_sequence("C-f").unwrap(),
             "beginning-of-buffer",
-        );
+        )
+        .unwrap();
         ed.push_key(Key::ctrl('f'));
         let seq = ed.pending_keys().to_vec();
         assert_eq!(
@@ -1108,9 +1158,10 @@ mod tests {
     fn minor_keymap_has_priority() {
         let mut ed = Editor::new(20, 80);
         ed.keymap_mut()
-            .bind_sequence(&crate::key::parse_sequence("C-f").unwrap(), "forward-char");
+            .bind_sequence(&crate::key::parse_sequence("C-f").unwrap(), "forward-char")
+            .unwrap();
         let mut km = Keymap::new();
-        km.bind(Key::ctrl('f'), "end-of-buffer");
+        km.bind(Key::ctrl('f'), "end-of-buffer").unwrap();
         ed.register_minor_def(MinorModeDef {
             name: "test-minor".into(),
             doc: String::new(),
@@ -1134,7 +1185,9 @@ mod tests {
     fn prefix_stays_in_source_keymap() {
         let mut ed = Editor::new(20, 80);
         let mut local = Keymap::new();
-        local.bind_sequence(&crate::key::parse_sequence("C-c C-c").unwrap(), "local-cmd");
+        local
+            .bind_sequence(&crate::key::parse_sequence("C-c C-c").unwrap(), "local-cmd")
+            .unwrap();
         let idx = ed.selected_buffer_index();
         ed.buffers_mut()[idx].set_local_keymap(Some(local));
         ed.push_key(Key::ctrl('c'));

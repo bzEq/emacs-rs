@@ -65,23 +65,28 @@ function M.open_file(path)
   M.record_file_stat(raw.selected_buffer_id())
 end
 
-function M.save_buffer_at_id(id)
-  if not raw.buffer_info(id).path then
-    local name = emacs.read_string("File to save in: ", nil)
-    if not name or name == "" then return false end
-    raw.set_buffer_path(id, name)
-    raw.set_buffer_name(id, name:match("([^/]+)$") or name)
+function M.save_buffer_at_id(id, path, name)
+  local info = raw.buffer_info(id)
+  path = path or info.path
+  name = name or info.name
+  if not path then
+    local input = emacs.read_string("File to save in: ", nil)
+    if not input or input == "" then return false end
+    path = input
+    name = input:match("([^/]+)$") or input
   end
   M.run_hook("before_save")
-  local ok, err = pcall(raw.save_buffer_to_disk, id)
+  local ok, err = pcall(raw.save_buffer_as, id, path)
   if not ok then
     emacs.error("Cannot save: " .. tostring(err))
     return false
   end
+  raw.set_buffer_path(id, path)
+  raw.set_buffer_name(id, name)
   raw.set_buffer_modified(id, false)
   M.record_file_stat(id)
   M.run_hook("after_save")
-  emacs.message("Wrote " .. (raw.buffer_info(id).path or ""))
+  emacs.message("Wrote " .. path)
   return true
 end
 
@@ -152,9 +157,9 @@ M.define("write-file", function()
   local default = raw.buffer_info(id).path or ""
   local name = emacs.read_string("Write file: " .. default .. " ", nil)
   if not name or name == "" then return end
-  raw.set_buffer_path(id, name)
-  raw.set_buffer_name(id, name:match("([^/]+)$") or name)
-  M.save_buffer_at_id(id)
+  local trimmed = name:match("^%s*(.-)%s*$")
+  local target_name = trimmed:match("([^/]+)$") or trimmed
+  M.save_buffer_at_id(id, trimmed, target_name)
 end, "Save the current buffer to a new file.")
 
 M.define("switch-to-buffer", function()

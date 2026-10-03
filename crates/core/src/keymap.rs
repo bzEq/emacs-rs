@@ -33,33 +33,42 @@ impl Keymap {
     }
 
     /// Bind a full key sequence to a command, creating prefix keymaps as
-    /// needed. Passing an empty sequence is a no-op.
-    pub fn bind_sequence(&mut self, seq: &[Key], command: impl Into<String>) {
+    /// needed. Existing commands and prefixes are never silently replaced.
+    pub fn bind_sequence(&mut self, seq: &[Key], command: impl Into<String>) -> Result<(), String> {
+        let mut candidate = self.clone();
+        candidate.bind_sequence_inner(seq, command.into())?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn bind_sequence_inner(&mut self, seq: &[Key], command: String) -> Result<(), String> {
         match seq {
-            [] => {}
-            [key] => {
-                self.bindings.insert(*key, Action::Command(command.into()));
-            }
+            [] => Ok(()),
+            [key] => match self.bindings.get(key) {
+                Some(Action::Prefix(_)) => Err(format!("key {key} is already a prefix")),
+                Some(Action::Command(_)) | None => {
+                    self.bindings.insert(*key, Action::Command(command));
+                    Ok(())
+                }
+            },
             [key, rest @ ..] => {
-                let child = match self.bindings.entry(*key) {
-                    std::collections::hash_map::Entry::Occupied(e) => match e.into_mut() {
-                        Action::Prefix(p) => p,
-                        Action::Command(_) => panic!("key {key} already bound to a command"),
-                    },
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        match e.insert(Action::Prefix(Keymap::new())) {
-                            Action::Prefix(p) => p,
-                            _ => unreachable!(),
-                        }
-                    }
-                };
-                child.bind_sequence(rest, command);
+                if matches!(self.bindings.get(key), Some(Action::Command(_))) {
+                    return Err(format!("key {key} is already bound to a command"));
+                }
+                let child = self
+                    .bindings
+                    .entry(*key)
+                    .or_insert_with(|| Action::Prefix(Keymap::new()));
+                match child {
+                    Action::Prefix(p) => p.bind_sequence_inner(rest, command),
+                    Action::Command(_) => unreachable!(),
+                }
             }
         }
     }
 
-    pub fn bind(&mut self, key: Key, command: impl Into<String>) {
-        self.bindings.insert(key, Action::Command(command.into()));
+    pub fn bind(&mut self, key: Key, command: impl Into<String>) -> Result<(), String> {
+        self.bind_sequence(&[key], command)
     }
 
     /// Look up a full or partial key sequence (Emacs keymap-lookup semantics).
@@ -113,9 +122,11 @@ mod tests {
     #[test]
     fn lookup_and_prefix() {
         let mut km = Keymap::new();
-        km.bind_sequence(&parse_sequence("C-x C-f").unwrap(), "find-file");
-        km.bind_sequence(&parse_sequence("C-x C-s").unwrap(), "save-buffer");
-        km.bind(Key::ctrl('a'), "beginning-of-line");
+        km.bind_sequence(&parse_sequence("C-x C-f").unwrap(), "find-file")
+            .unwrap();
+        km.bind_sequence(&parse_sequence("C-x C-s").unwrap(), "save-buffer")
+            .unwrap();
+        km.bind(Key::ctrl('a'), "beginning-of-line").unwrap();
 
         assert_eq!(km.lookup(&parse_sequence("C-x").unwrap()), Lookup::Prefix);
         assert_eq!(
@@ -136,8 +147,10 @@ mod tests {
     #[test]
     fn flatten() {
         let mut km = Keymap::new();
-        km.bind_sequence(&parse_sequence("C-x C-f").unwrap(), "find-file");
-        km.bind_sequence(&parse_sequence("C-a").unwrap(), "beginning-of-line");
+        km.bind_sequence(&parse_sequence("C-x C-f").unwrap(), "find-file")
+            .unwrap();
+        km.bind_sequence(&parse_sequence("C-a").unwrap(), "beginning-of-line")
+            .unwrap();
         let flat = km.flatten();
         assert_eq!(flat.len(), 2);
         assert!(flat.contains(&(parse_sequence("C-x C-f").unwrap(), "find-file".into())));

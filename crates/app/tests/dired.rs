@@ -20,7 +20,10 @@ fn find_file_on_directory_opens_dired() {
     let d = em.scratch.join("work");
     std::fs::create_dir(&d).unwrap();
     std::fs::write(d.join("alpha.txt"), "aaa").unwrap();
-    let d_s = d.to_string_lossy().into_owned();
+    let d_s = std::fs::canonicalize(&d)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut em = Em::spawn();
     assert!(em.wait_for("lines", 5000), "editor ready");
     em.keys(b"\x18\x06"); // C-x C-f
@@ -40,7 +43,10 @@ fn directory_argument_opens_dired() {
     let d = em.scratch.join("work");
     std::fs::create_dir(&d).unwrap();
     std::fs::write(d.join("alpha.txt"), "aaa").unwrap();
-    let d_s = d.to_string_lossy().into_owned();
+    let d_s = std::fs::canonicalize(&d)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut em = Em::spawn_with_args(&[&d_s]);
     assert!(
         em.wait_for("alpha.txt", 5000),
@@ -57,7 +63,10 @@ fn listing_shows_entries() {
     std::fs::create_dir(&d).unwrap();
     std::fs::write(d.join("alpha.txt"), "aaa").unwrap();
     std::fs::create_dir(d.join("sub")).unwrap();
-    let d_s = d.to_string_lossy().into_owned();
+    let d_s = std::fs::canonicalize(&d)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut em = Em::spawn();
     open_dired(&mut em, &d_s);
     assert!(em.wait_for("alpha.txt", 5000), "file listed");
@@ -73,7 +82,10 @@ fn mark_and_rename() {
     let d = em.scratch.join("work");
     std::fs::create_dir(&d).unwrap();
     std::fs::write(d.join("alpha.txt"), "aaa").unwrap();
-    let d_s = d.to_string_lossy().into_owned();
+    let d_s = std::fs::canonicalize(&d)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut em = Em::spawn();
     open_dired(&mut em, &d_s);
     assert!(em.wait_for("alpha.txt", 5000));
@@ -103,7 +115,10 @@ fn delete_with_confirmation() {
     let d = em.scratch.join("work");
     std::fs::create_dir(&d).unwrap();
     std::fs::write(d.join("beta.txt"), "bbb").unwrap();
-    let d_s = d.to_string_lossy().into_owned();
+    let d_s = std::fs::canonicalize(&d)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut em = Em::spawn();
     open_dired(&mut em, &d_s);
     assert!(em.wait_for("beta.txt", 5000));
@@ -130,7 +145,10 @@ fn create_directory_and_navigate() {
     let d = em.scratch.join("work");
     std::fs::create_dir(&d).unwrap();
     std::fs::create_dir(d.join("sub")).unwrap();
-    let d_s = d.to_string_lossy().into_owned();
+    let d_s = std::fs::canonicalize(&d)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut em = Em::spawn();
     open_dired(&mut em, &d_s);
     assert!(em.wait_for("sub/", 5000));
@@ -139,7 +157,11 @@ fn create_directory_and_navigate() {
         em.keys(b"\x0e");
     }
     em.keys(b"\r"); // enter sub
-    assert!(em.wait_for(&format!("{}/sub:", d_s), 5000), "inside subdir");
+    let subdir = std::fs::canonicalize(d.join("sub")).unwrap();
+    assert!(
+        em.wait_for(&format!("{}:", subdir.display()), 5000),
+        "inside subdir"
+    );
     em.keys(b"+");
     assert!(em.wait_for("Create directory:", 3000));
     em.type_str("newdir");

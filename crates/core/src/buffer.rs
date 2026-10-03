@@ -151,6 +151,11 @@ impl Buffer {
         let path = self.path.as_ref().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "buffer has no file name")
         })?;
+        self.save_to(path)
+    }
+
+    /// Write to a destination without changing the buffer's identity.
+    pub fn save_to(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let mut file = File::create(path)?;
         for chunk in self.rope.chunks() {
             file.write_all(chunk.as_bytes())?;
@@ -264,6 +269,23 @@ impl Buffer {
 
     pub fn set_read_only(&mut self, ro: bool) {
         self.read_only = ro;
+    }
+
+    /// Replace contents for trusted internal refreshes such as dired/help.
+    pub fn replace_content(&mut self, text: &str) {
+        self.rope = Rope::from_str(text);
+        self.point = 0;
+        self.mark = None;
+        self.modified = false;
+    }
+
+    /// Replace a range for trusted internal metadata edits in read-only buffers.
+    pub fn replace_range_internal(&mut self, start: usize, end: usize, text: &str) {
+        let start = start.min(self.rope.len_chars());
+        let end = end.min(self.rope.len_chars()).max(start);
+        self.rope.remove(start..end);
+        self.rope.insert(start, text);
+        self.point = (start + text.chars().count()).min(self.rope.len_chars());
     }
 
     pub fn mode(&self) -> &Mode {
@@ -455,7 +477,7 @@ impl Buffer {
     // --- editing -----------------------------------------------------------
 
     pub fn insert(&mut self, text: &str) {
-        if text.is_empty() {
+        if self.read_only || text.is_empty() {
             return;
         }
         let len = text.chars().count();
@@ -472,6 +494,9 @@ impl Buffer {
 
     /// Insert `text` at `pos` (not necessarily point); point is unchanged.
     pub fn insert_at(&mut self, pos: usize, text: &str) {
+        if self.read_only {
+            return;
+        }
         let pos = pos.min(self.rope.len_chars());
         let len = text.chars().count();
         if len == 0 {
@@ -497,7 +522,7 @@ impl Buffer {
     /// Delete `start..end` and return the removed text. Adjusts point and
     /// mark; does not record undo information.
     pub fn delete_range(&mut self, start: usize, end: usize) -> String {
-        if end <= start || start >= self.rope.len_chars() {
+        if self.read_only || end <= start || start >= self.rope.len_chars() {
             return String::new();
         }
         let end = end.min(self.rope.len_chars());

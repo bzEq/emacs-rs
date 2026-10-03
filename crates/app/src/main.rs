@@ -6,7 +6,6 @@
 //! plus the user's init.lua), driven as coroutines from this loop.
 
 use std::io::{self, Stdout};
-use std::panic;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -31,6 +30,16 @@ struct CliArgs {
     init: Option<PathBuf>,
     /// First positional argument: file to open.
     file: Option<String>,
+}
+
+/// Restores the terminal if startup or the event loop exits unexpectedly.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+    }
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String> {
@@ -92,16 +101,10 @@ fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let _terminal_guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let size = terminal.size()?;
-
-    let hook = panic::take_hook();
-    panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        hook(info);
-    }));
 
     let mut ed = Editor::new(size.height.saturating_sub(2) as usize, size.width as usize);
 
@@ -162,11 +165,16 @@ fn init_file() -> Option<PathBuf> {
 fn suspend_frame(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen, Show)?;
-    // Stop our process group: SIGTSTP (the shell's `fg` sends SIGCONT).
-    // Fails (EINTR-less EPERM) if job control isn't available; the editor
-    // then just keeps running.
-    unsafe {
-        libc::kill(0, libc::SIGTSTP);
+    // Stop only this editor process. The shell's `fg` sends SIGCONT when it
+    // resumes the foreground job. Check both PID lookup and signal delivery;
+    // silently continuing would leave the terminal in shell mode.
+    let pid = unsafe { libc::getpid() };
+    if pid <= 0 {
+        return Err(anyhow::anyhow!("cannot determine editor PID"));
+    }
+    let rc = unsafe { libc::kill(pid, libc::SIGTSTP) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
     }
     // Resumed: take the terminal back and redraw everything.
     enable_raw_mode()?;
@@ -185,6 +193,7 @@ fn run(ed: &mut Editor, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     // to idle cheaply.
     const DRAIN: std::time::Duration = std::time::Duration::from_millis(250);
     loop {
+        fw.sync(ed);
         ed.scroll_current_view();
         terminal.draw(|f| {
             if let Some((x, y)) = render(f, ed) {

@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use emacs_core::editor::Editor;
+use emacs_core::input::handle_key;
 use emacs_core::key::Key;
 use emacs_core::script::{CommandOutcome, PendingRequest, ResumeValue};
 use emacs_lua::LuaHost;
@@ -127,12 +128,7 @@ impl LuaEd {
             matches!(self.ed.pending(), Some(PendingRequest::ReadKey)),
             "no read-key request pending"
         );
-        self.ed.set_read_key(key);
-        let outcome = self
-            .ed
-            .resume_pending(ResumeValue::Key(key))
-            .expect("resume");
-        assert!(self.ed.finish_command(outcome).is_none());
+        handle_key(&mut self.ed, key).expect("handle key");
         matches!(self.ed.pending(), Some(PendingRequest::ReadKey))
     }
 

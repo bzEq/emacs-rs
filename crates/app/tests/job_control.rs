@@ -5,11 +5,17 @@ mod common;
 
 use common::{write_file, Em};
 
-/// True if the child is in a job-control stop (`T` in its stat file).
+/// True if the process state reported by the host's `ps` is stopped.
+/// Unlike `/proc/<pid>/stat`, `ps` is available on Darwin as well as Linux.
 fn is_stopped(pid: u32) -> bool {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-    let state = stat.rsplit(')').next().unwrap_or("");
-    state.split_whitespace().next() == Some("T")
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    let state = String::from_utf8_lossy(&output.stdout);
+    state.trim_start().starts_with('T')
 }
 
 #[test]

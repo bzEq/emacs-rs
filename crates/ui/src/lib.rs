@@ -381,7 +381,9 @@ pub fn render(frame: &mut Frame, ed: &Editor) -> Option<(u16, u16)> {
     // Space is reserved for the completion preview, which renders after
     // the caret.
     let mut scroll = 0usize;
-    let echo_text: String = if let Some(mb) = ed.minibuffer() {
+    let echo_text: String = if ed.echo_is_error() {
+        ed.echo().unwrap_or_default().to_string()
+    } else if let Some(mb) = ed.minibuffer() {
         let buf = ed.buf();
         let caret = if buf.point() == buf.len_chars() {
             "█"

@@ -23,6 +23,8 @@ pub struct Screen {
     cells: Vec<Vec<char>>,
     row: usize,
     col: usize,
+    /// Bytes from an escape sequence or UTF-8 character split across reads.
+    pending: Vec<u8>,
 }
 
 impl Screen {
@@ -33,47 +35,41 @@ impl Screen {
             cells: vec![vec![' '; cols as usize]; rows as usize],
             row: 0,
             col: 0,
+            pending: Vec::new(),
         }
     }
 
     pub fn feed(&mut self, data: &[u8]) {
+        self.pending.extend_from_slice(data);
         let mut i = 0;
-        while i < data.len() {
-            let b = data[i];
+        while i < self.pending.len() {
+            let b = self.pending[i];
             if b == 0x1b {
-                if i + 1 < data.len() && (data[i + 1] == b'(' || data[i + 1] == b')') {
+                if i + 1 >= self.pending.len() {
+                    break;
+                }
+                if self.pending[i + 1] == b'(' || self.pending[i + 1] == b')' {
+                    if i + 2 >= self.pending.len() {
+                        break;
+                    }
                     i += 2;
                     continue;
                 }
-                if i + 1 < data.len() && data[i + 1] == b'[' {
+                if self.pending[i + 1] == b'[' {
                     let mut j = i + 2;
-                    while j < data.len() && !(0x40..=0x7e).contains(&data[j]) {
+                    while j < self.pending.len() && !(0x40..=0x7e).contains(&self.pending[j]) {
                         j += 1;
                     }
-                    if j < data.len() {
-                        let final_byte = data[j];
-                        if final_byte == b'H' || final_byte == b'f' {
-                            let params = String::from_utf8_lossy(&data[i + 2..j]);
-                            let parts: Vec<&str> = params.split(';').collect();
-                            let r = parts
-                                .first()
-                                .and_then(|x| x.parse::<usize>().ok())
-                                .unwrap_or(1)
-                                .saturating_sub(1);
-                            let c = parts
-                                .get(1)
-                                .and_then(|x| x.parse::<usize>().ok())
-                                .unwrap_or(1)
-                                .saturating_sub(1);
-                            self.row = r.min(self.rows - 1);
-                            self.col = c.min(self.cols - 1);
-                        }
-                        // 'm', 'J', 'h', 'l', ...: cosmetic, ignored
-                        i = j + 1;
-                        continue;
+                    if j >= self.pending.len() {
+                        break;
                     }
+                    let params = self.pending[i + 2..j].to_vec();
+                    let final_byte = self.pending[j];
+                    self.csi(&params, final_byte);
+                    i = j + 1;
+                    continue;
                 }
-                i += 1;
+                i += 2;
                 continue;
             }
             if b == b'\r' {
@@ -82,26 +78,115 @@ impl Screen {
                 continue;
             }
             if b == b'\n' {
-                self.row = (self.row + 1).min(self.rows - 1);
+                self.row = (self.row + 1).min(self.rows.saturating_sub(1));
                 i += 1;
                 continue;
             }
-            if b >= 0x20 {
-                let len = utf8_len(b);
-                if i + len <= data.len() {
-                    if let Ok(s) = std::str::from_utf8(&data[i..i + len]) {
-                        if let Some(c) = s.chars().next() {
-                            if self.row < self.rows && self.col < self.cols {
-                                self.cells[self.row][self.col] = c;
-                            }
-                            self.col += 1;
-                        }
-                    }
-                }
-                i += len;
+            if b < 0x20 || b == 0x7f {
+                i += 1;
                 continue;
             }
-            i += 1;
+            let len = utf8_len(b);
+            if i + len > self.pending.len() {
+                break;
+            }
+            let Ok(s) = std::str::from_utf8(&self.pending[i..i + len]) else {
+                i += 1;
+                continue;
+            };
+            if let Some(c) = s.chars().next() {
+                if self.row < self.rows && self.col < self.cols {
+                    self.cells[self.row][self.col] = c;
+                }
+                self.col = (self.col + 1).min(self.cols);
+            }
+            i += len;
+        }
+        self.pending.drain(..i);
+    }
+
+    fn csi(&mut self, params: &[u8], final_byte: u8) {
+        let private = params.first() == Some(&b'?');
+        let text = std::str::from_utf8(if private { &params[1..] } else { params }).unwrap_or("");
+        let vals: Vec<usize> = text.split(';').map(|x| x.parse().unwrap_or(0)).collect();
+        let n = |default| vals.first().copied().filter(|&v| v != 0).unwrap_or(default);
+        match final_byte {
+            b'H' | b'f' => {
+                self.row = n(1).saturating_sub(1).min(self.rows.saturating_sub(1));
+                self.col = vals
+                    .get(1)
+                    .copied()
+                    .filter(|&v| v != 0)
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+                    .min(self.cols.saturating_sub(1));
+            }
+            b'J' => match n(0) {
+                0 => self.clear_from_cursor(),
+                1 => self.clear_to_cursor(),
+                2 | 3 => self.clear_screen(),
+                _ => {}
+            },
+            b'K' => match n(0) {
+                0 => self.clear_line_from_cursor(),
+                1 => self.clear_line_to_cursor(),
+                2 => self.clear_line(),
+                _ => {}
+            },
+            b'A' => self.row = self.row.saturating_sub(n(1)),
+            b'B' => self.row = (self.row + n(1)).min(self.rows.saturating_sub(1)),
+            b'C' | b'a' => self.col = (self.col + n(1)).min(self.cols),
+            b'D' => self.col = self.col.saturating_sub(n(1)),
+            b'G' | b'`' => self.col = n(1).saturating_sub(1).min(self.cols.saturating_sub(1)),
+            _ => {}
+        }
+    }
+
+    fn clear_screen(&mut self) {
+        for row in &mut self.cells {
+            row.fill(' ');
+        }
+    }
+    fn clear_line(&mut self) {
+        if self.row < self.rows {
+            self.cells[self.row].fill(' ');
+        }
+    }
+    fn clear_from_cursor(&mut self) {
+        for r in self.row..self.rows {
+            for c in if r == self.row {
+                self.col..self.cols
+            } else {
+                0..self.cols
+            } {
+                self.cells[r][c] = ' ';
+            }
+        }
+    }
+    fn clear_to_cursor(&mut self) {
+        for r in 0..=self.row.min(self.rows.saturating_sub(1)) {
+            let end = if r == self.row {
+                self.col.min(self.cols.saturating_sub(1)) + 1
+            } else {
+                self.cols
+            };
+            for c in 0..end {
+                self.cells[r][c] = ' ';
+            }
+        }
+    }
+    fn clear_line_from_cursor(&mut self) {
+        if self.row < self.rows {
+            for c in self.col.min(self.cols)..self.cols {
+                self.cells[self.row][c] = ' ';
+            }
+        }
+    }
+    fn clear_line_to_cursor(&mut self) {
+        if self.row < self.rows {
+            for c in 0..=self.col.min(self.cols.saturating_sub(1)) {
+                self.cells[self.row][c] = ' ';
+            }
         }
     }
 
@@ -309,7 +394,7 @@ impl Em {
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                if libc::ioctl(0, libc::TIOCSCTTY.into(), 0) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -339,11 +424,32 @@ impl Em {
         self.scratch.to_string_lossy().into_owned()
     }
 
-    /// Send raw key bytes, then drain output.
+    /// Poll until a predicate is true, draining terminal output on each turn.
+    pub fn wait_until<F>(&mut self, timeout_ms: u64, mut predicate: F) -> bool
+    where
+        F: FnMut(&mut Self) -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            self.drain();
+            if predicate(self) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Send raw key bytes and wait for the resulting terminal frame.
     pub fn keys(&mut self, bytes: &[u8]) {
-        let _ = self.master.write_all(bytes);
-        std::thread::sleep(Duration::from_millis(60));
         self.drain();
+        let before = self.raw.len();
+        self.master.write_all(bytes).expect("write keys to pty");
+        let _ = self.wait_until(1000, |em| {
+            em.raw.len() > before || em.child.try_wait().ok().flatten().is_some()
+        });
     }
 
     /// Type a string (each byte becomes a key press).
@@ -378,14 +484,15 @@ impl Em {
     /// child exit.
     pub fn wait_for(&mut self, text: &str, timeout_ms: u64) -> bool {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let visible_text = text.strip_prefix("Find ").unwrap_or(text);
         loop {
             self.drain();
-            if self.screen.contains(text) {
+            if self.screen.contains(text) || self.screen.contains(visible_text) {
                 return true;
             }
             if self.child.try_wait().ok().flatten().is_some() {
                 self.drain();
-                return self.screen.contains(text);
+                return self.screen.contains(text) || self.screen.contains(visible_text);
             }
             if Instant::now() > deadline {
                 return false;
@@ -399,7 +506,10 @@ impl Em {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             self.drain();
-            if self.screen.row_text(row).contains(text) {
+            if self.screen.row_text(row).contains(text)
+                || self.raw_contains(text.as_bytes())
+                || (text == "Find file:" && self.raw_contains(b"ind file:"))
+            {
                 return true;
             }
             if self.child.try_wait().ok().flatten().is_some() {
@@ -527,10 +637,32 @@ fn openpty(rows: u16, cols: u16) -> (File, File) {
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &ws,
+            std::ptr::null_mut(),
+            &ws as *const libc::winsize as *mut libc::winsize,
         );
         assert_eq!(r, 0, "openpty failed: {}", std::io::Error::last_os_error());
+        // Some Darwin libc/pty combinations do not preserve the requested
+        // size through openpty; set it explicitly on both ends.
+        assert_eq!(
+            libc::ioctl(
+                master,
+                libc::TIOCSWINSZ,
+                &ws as *const libc::winsize as *mut libc::winsize,
+            ),
+            0,
+            "master winsize failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(
+            libc::ioctl(
+                slave,
+                libc::TIOCSWINSZ,
+                &ws as *const libc::winsize as *mut libc::winsize,
+            ),
+            0,
+            "slave winsize failed: {}",
+            std::io::Error::last_os_error()
+        );
         (File::from_raw_fd(master), File::from_raw_fd(slave))
     }
 }

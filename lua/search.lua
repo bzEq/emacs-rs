@@ -247,19 +247,27 @@ local function run(forward)
   -- active; unbound printable keys extend the query, anything else ends
   -- the search and is replayed against the buffer.
   raw.set_overriding_keymap(M.isearch_bindings)
+  local override_seq = {}
   local ok, err = pcall(function()
     while s.active do
       local key = emacs.read_key()
-      local status, cmd = raw.lookup_overriding_key(key)
-      if status == "command" then
+      override_seq[#override_seq + 1] = key
+      local seq = table.concat(override_seq, " ")
+      local status, cmd = raw.lookup_overriding_key(seq)
+      if status == "prefix" then
+        -- Keep collecting keys for a multi-key isearch binding.
+      elseif status == "command" then
+        override_seq = {}
         M.run_command(cmd, key)
-      elseif is_printable(key) then
+      elseif #override_seq == 1 and is_printable(key) then
+        override_seq = {}
         M.run_command("isearch-printing-char", key)
       else
         -- Keep honoring a `yank' rebinding from the normal keymaps, so a
         -- custom yank key works in the search too.
-        local gstatus, global_cmd = raw.lookup_key(key)
-        if gstatus == "command" and global_cmd == "yank" then
+        local gstatus, global_cmd = raw.lookup_key(seq)
+        if #override_seq == 1 and gstatus == "command" and global_cmd == "yank" then
+          override_seq = {}
           M.run_command("isearch-yank-kill")
         else
           raw.clear_search_match()
@@ -270,6 +278,8 @@ local function run(forward)
     end
   end)
   raw.clear_overriding_keymap()
+  s.active = false
+  raw.clear_search_match()
   if not ok then error(err) end
 end
 
